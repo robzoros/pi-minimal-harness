@@ -55,8 +55,11 @@ your-project/
 │       └── harness.ts          # the whole harness (commands, driver, dispatch)
 ├── harness.config.yaml         # modes, agents, models, gates
 ├── prompts/                    # the five agent prompt templates
-│   ├── orchestrator.md  explorer.md  critic.md
-│   └── implementer.md  delivery.md
+│   ├── orchestrator.md
+│   ├── explorer.md
+│   ├── critic.md
+│   └── implementer.md
+│   ├── delivery.md
 ├── .agents/
 │   ├── skills/
 │   │   └── github-delivery/SKILL.md
@@ -126,7 +129,7 @@ delivery skill).
 | `/harness-model [agent model-id]` | Pick an agent's model from Pi's catalog |
 | `/harness-run <task>` | Force the pipeline for one task |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
-| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision (moved to the footer, not shown in the answer) |
+| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision  |
 | `HARNESS-DONE` | Mandatory last line of every non-orchestrator agent reply |
 
 ## Skills
@@ -165,7 +168,8 @@ MIT — see [LICENSE](LICENSE).
 
 - [Pi](https://github.com/earendil-works/pi) — the agent runtime this harness
   extends.
-- **gentle-pi / Gentleman Programming** — the inspiration (not a fork; go look
-  at it). Engram comes from the same ecosystem:
-  [`gentle-engram`](https://www.npmjs.com/package/gentle-engram).
+- [`gentle-shell`](https://github.com/Gentleman-Programming/gentle-shell) de **Gentleman Programming** — the inspiration (not a fork; go look
+  at it). 
+- [`engram`](https://github.com/Gentleman-Programming/engram) comes from the same ecosystem:
+  .
 - CodeGraph — structural exploration for source trees.
