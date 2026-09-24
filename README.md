@@ -84,10 +84,12 @@ your-project/
 
 **Optional integrations** (both recommended, both independent of the harness):
 
-- **Engram**: install the `gentle-engram` and `pi-mcp-adapter` packages in
+- **Engram**: install `engram` and `pi-mcp-adapter` packages in
   Pi's `settings.json`, register `engram mcp --tools=agent` in
-  `~/.pi/agent/mcp.json`, and run `engram serve`. See
-  [`AGENTS-addition.md`](AGENTS-addition.md) for the memory protocol.
+  `~/.pi/agent/mcp.json`. Run engram serve — in normal use engram starts it on
+  demand, but after installing or upgrading engram you must (re)start it yourself,
+  because an already-running server keeps the port and the new binary stays unused.
+  See [`AGENTS-addition.md`](AGENTS-addition.md) for the memory protocol.
 - **CodeGraph**: `npm i -g codegraph`, then `codegraph init --cwd <repo root>`
   in the project.
 
