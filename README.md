@@ -94,14 +94,16 @@ with:
 npx pi-minimal-harness init
 ```
 
-The installer copies the extension, prompts, delivery skill, configuration
-example, and the generic `AGENTS.md` contract. It is idempotent and refuses to
-overwrite conflicting files unless `--force` is supplied. Preview changes
-without writing anything with:
+The two commands have different effects:
 
-```bash
-npx pi-minimal-harness init --project /path/to/project --dry-run
-```
+| Command | Effect |
+|---|---|
+| `npx pi-minimal-harness init` | **Installs** the extension, prompts, delivery skill, `harness.config.yaml`, and the generic `AGENTS.md` contract. |
+| `npx pi-minimal-harness init --project /path/to/project --dry-run` | **Only previews** the changes; it writes no files. |
+
+The installer is idempotent: running it again does not duplicate the contract
+or rewrite identical files. It refuses to overwrite conflicting files unless
+`--force` is supplied.
 
 The generated `harness.config.yaml` is treated as local configuration. When the
 project is inside a Git repository, the installer adds it to the repository's
@@ -112,8 +114,13 @@ in `git status` or travel with pushes. The versionable source template is
 Other useful options:
 
 ```bash
+# Install into a specific project
 npx pi-minimal-harness init --project /path/to/project
+
+# Replace conflicting generated files
 npx pi-minimal-harness init --force
+
+# Show the command help
 npx pi-minimal-harness init --help
 ```
 
