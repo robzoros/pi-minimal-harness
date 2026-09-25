@@ -40,7 +40,8 @@ workflow you can actually audit.
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
-| Smoke tests | `node tests/harness.test.mjs` — 92 checks, no network, no real config writes |
+| Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
+| Tests | `node tests/harness.test.mjs` (92 checks) and `node tests/install.test.mjs` (3 installer tests) |
 
 ## Install in your Pi project
 
@@ -83,6 +84,41 @@ your-project/
 4. Start Pi in your project and run `/reload`.
 5. Try it: `/harness-mode full-dry-run`, then a plain question (it should stop
    at the orchestrator), then `/harness-run "a small task"`.
+
+## Automated project installation
+
+After publishing this package, install the harness into an existing project
+with:
+
+```bash
+npx pi-minimal-harness init
+```
+
+The installer copies the extension, prompts, delivery skill, configuration
+example, and the generic `AGENTS.md` contract. It is idempotent and refuses to
+overwrite conflicting files unless `--force` is supplied. Preview changes
+without writing anything with:
+
+```bash
+npx pi-minimal-harness init --project /path/to/project --dry-run
+```
+
+The generated `harness.config.yaml` is treated as local configuration. When the
+project is inside a Git repository, the installer adds it to the repository's
+local `.git/info/exclude`, so model choices and workflow settings do not appear
+in `git status` or travel with pushes. The versionable source template is
+`harness.config.example.yaml`.
+
+Other useful options:
+
+```bash
+npx pi-minimal-harness init --project /path/to/project
+npx pi-minimal-harness init --force
+npx pi-minimal-harness init --help
+```
+
+After installation, configure models in `harness.config.yaml`, run `/reload`,
+and validate with `/harness-config`.
 
 **Optional integrations** (both recommended, both independent of the harness):
 

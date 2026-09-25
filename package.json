@@ -1,0 +1,29 @@
+{
+  "name": "pi-minimal-harness",
+  "version": "0.1.0",
+  "description": "Minimal, configuration-driven multi-agent harness for Pi",
+  "type": "module",
+  "bin": {
+    "pi-minimal-harness": "bin/pi-minimal-harness.mjs"
+  },
+  "files": [
+    "bin/",
+    ".pi/extensions/",
+    "prompts/",
+    ".agents/skills/github-delivery/",
+    "AGENTS-addition.md",
+    "harness.config.example.yaml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node tests/harness.test.mjs && node tests/install.test.mjs"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "agent",
+    "harness"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,114 @@
+project: my-project
+
+defaults:
+  workflow_mode: simple
+  auto_harness: true
+  question_short_circuit: true
+  allow_dispatch: true
+  subagent_context_file: AGENTS-addition.md
+  allow_simple_mode: true
+
+commands:
+  preferred_interface: slash
+  fallback_interface: skills
+  model_catalog_source: /models
+
+workflows:
+  full-dry-run:
+    steps:
+      - orchestrator
+      - explorer
+      - critic
+  full:
+    steps:
+      - orchestrator
+      - explorer
+      - critic
+      - implementer
+      - delivery
+  simple:
+    steps:
+      - orchestrator
+      - implementer
+  implementation-only:
+    steps:
+      - orchestrator
+      - implementer
+  delivery-only:
+    steps:
+      - orchestrator
+      - delivery
+
+agents:
+  orchestrator:
+    model: provider/model-id
+    reasoning: medium
+    tools:
+      - filesystem
+      - engram
+    prompt_template: prompts/orchestrator.md
+    responsibilities:
+      - classify_task
+      - select_workflow_mode
+      - prepare_next_agent_prompt
+  explorer:
+    model: provider/model-id
+    reasoning: high
+    tools:
+      - filesystem
+      - openspec
+      - engram
+      - codegraph
+    prompt_template: prompts/explorer.md
+    responsibilities:
+      - explore_repository
+      - identify_relevant_files
+      - propose_solution
+  critic:
+    model: provider/model-id
+    reasoning: medium
+    tools:
+      - filesystem
+      - openspec
+    prompt_template: prompts/critic.md
+    responsibilities:
+      - challenge_plan
+      - identify_risks
+      - suggest_simpler_approach
+  implementer:
+    model: provider/model-id
+    reasoning: high
+    tools:
+      - filesystem
+      - shell
+      - tests
+      - engram
+    prompt_template: prompts/implementer.md
+    responsibilities:
+      - edit_files
+      - run_checks
+      - inspect_diff
+  delivery:
+    model: provider/model-id
+    reasoning: low
+    tools:
+      - git
+      - github
+    skills:
+      - github-delivery
+    prompt_template: prompts/delivery.md
+    responsibilities:
+      - create_branch
+      - commit_changes
+      - push_branch
+      - create_pull_request
+
+skills:
+  project_directory: .agents/skills
+  current:
+    - github-delivery
+  create_when:
+    - a procedure is repeated across tasks
+    - a procedure has safety or ordering constraints
+    - a procedure requires project-specific conventions
+    - a procedure benefits from a checklist

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A dependency-free `pi-minimal-harness init` installer with dry-run, force,
+  idempotent contract merging, and local Git exclusion for the generated config.
 - Model-aware reasoning-effort selection in `/harness-model`: after choosing a
   model from Pi's catalog, the operator chooses from the effort levels exposed
   by that model. Model and effort are persisted atomically in the agent block.
