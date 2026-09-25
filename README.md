@@ -87,8 +87,7 @@ your-project/
 
 ## Automated project installation
 
-After publishing this package, install the harness into an existing project
-with:
+Install this harness into an existing project with:
 
 ```bash
 npx pi-minimal-harness init
