@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Model-aware reasoning-effort selection in `/harness-model`: after choosing a
+  model from Pi's catalog, the operator chooses from the effort levels exposed
+  by that model. Model and effort are persisted atomically in the agent block.
+
+### Changed
+
+- Configuration validation now checks configured model IDs and model-supported
+  reasoning efforts when Pi's catalog is available.
+- Pipeline and background dispatch reject or warn about unsupported
+  model/effort combinations instead of silently applying them.
+- The interactive model/effort picker now returns to the agent menu after each
+  saved change, with an explicit `Cancel` action; argument-based selection stays
+  one-shot.
+- README Engram setup now recommends `pi-engram init` instead of requiring
+  manual Pi and MCP configuration.
+- Add `/harness-delivery` to run the delivery agent without changing the
+  configured workflow mode.
+- Add an advisory repository preflight before pipelines to warn about
+  uncommitted changes, branch divergence, and open pull requests.
+
 ## [0.1.0] - 2026-09-24
 
 First public release as **pi-minimal-harness**.

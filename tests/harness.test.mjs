@@ -31,7 +31,14 @@ cfgText = cfgText
   .replace(/^ {2}workflow_mode: .*$/m, "  workflow_mode: simple")
   .replace(/^ {2}auto_harness: .*$/m, "  auto_harness: true")
   .replace(/^ {2}question_short_circuit: .*$/m, "  question_short_circuit: true")
-  .replace(/^ {2}allow_dispatch: .*$/m, "  allow_dispatch: true");
+  .replace(/^ {2}allow_dispatch: .*$/m, "  allow_dispatch: true")
+  // Keep the smoke test independent of the operator's live model choices.
+  .replace(/^ {4}model: .*$/gm, "    model: opencode-go/gpt-5.1")
+  .replace(/(^ {2}orchestrator:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1medium")
+  .replace(/(^ {2}explorer:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1high")
+  .replace(/(^ {2}critic:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1medium")
+  .replace(/(^ {2}implementer:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1high")
+  .replace(/(^ {2}delivery:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1low");
 await fs.writeFile(cfgPath, cfgText);
 await fs.cp(path.join(ROOT, "prompts"), path.join(tmp, "prompts"), { recursive: true });
 await fs.copyFile(path.join(ROOT, "AGENTS-addition.md"), path.join(tmp, "AGENTS-addition.md"));
@@ -61,10 +68,16 @@ const nextAssistantText = () => {
 };
 
 const models = [
-  { id: "deepseek-v4.1-flash", name: "DeepSeek v4.1 Flash", provider: "opencode-go" },
-  { id: "mimo-v2.6-flash", name: "MiMo v2.6 Flash", provider: "opencode-go" },
-  { id: "gpt-5.1", name: "GPT 5.1", provider: "opencode-go" },
-  { id: "gpt-5.1-mini", name: "GPT 5.1 Mini", provider: "opencode-go" },
+  { id: "deepseek-v4.1-flash", name: "DeepSeek v4.1 Flash", provider: "opencode-go", reasoning: false },
+  { id: "mimo-v2.6-flash", name: "MiMo v2.6 Flash", provider: "opencode-go", reasoning: true },
+  {
+    id: "gpt-5.1",
+    name: "GPT 5.1",
+    provider: "opencode-go",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: null, max: "max" },
+  },
+  { id: "gpt-5.1-mini", name: "GPT 5.1 Mini", provider: "opencode-go", reasoning: true },
 ];
 const originalModel = { id: "orig", provider: "orig-p" };
 
@@ -147,7 +160,7 @@ const reset = () => {
 // --- registration ------------------------------------------------------------
 check(
   "factory registers commands",
-  ["harness-config", "harness-mode", "harness-model", "harness-run", "harness-auto"].every((c) => c in commands),
+  ["harness-config", "harness-mode", "harness-model", "harness-run", "harness-delivery", "harness-auto"].every((c) => c in commands),
   Object.keys(commands).join(","),
 );
 check(
@@ -179,6 +192,36 @@ check(
     mod.findModelRef("gpt-5.1-mini", { getAvailable: () => models, getAll: () => [] })?.id === "gpt-5.1-mini",
 );
 check("findModelRef unknown -> undefined", mod.findModelRef("no/such-model", { getAvailable: () => models, getAll: () => [] }) === undefined);
+const repositoryRunner = async (command, args) => {
+  if (command === "git" && args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, stdout: "/tmp/repo" };
+  if (command === "git" && args[0] === "status") return { ok: true, stdout: " M README.md" };
+  if (command === "git" && args[0] === "branch") return { ok: true, stdout: "feature\n" };
+  if (command === "git" && args[1]?.includes("--abbrev-ref")) return { ok: true, stdout: "origin/feature\n" };
+  if (command === "git" && args[0] === "rev-list") return { ok: true, stdout: "1 2\n" };
+  if (command === "gh") return { ok: true, stdout: JSON.stringify({ state: "OPEN", number: 7, url: "https://github.com/example/repo/pull/7" }) };
+  return { ok: false, stdout: "" };
+};
+const repositoryState = await mod.checkRepositoryState("/tmp/repo", repositoryRunner);
+check(
+  "repository preflight detects dirty, divergent, and open PR state",
+  repositoryState.dirty && repositoryState.ahead === 1 && repositoryState.behind === 2 && repositoryState.pullRequest?.number === 7,
+  JSON.stringify(repositoryState),
+);
+check(
+  "repository preflight warning advises syncing/resolving before work",
+  mod.formatRepositoryPreflight(repositoryState)?.includes("uncommitted") && mod.formatRepositoryPreflight(repositoryState)?.includes("pulling, pushing, or resolving"),
+  mod.formatRepositoryPreflight(repositoryState) ?? "",
+);
+check(
+  "supportedReasoningLevels follows model/provider metadata",
+  JSON.stringify(mod.supportedReasoningLevels(models[2])) === JSON.stringify(["minimal", "low", "medium", "high", "max"]) &&
+    JSON.stringify(mod.supportedReasoningLevels(models[0])) === JSON.stringify(["off"]),
+  JSON.stringify(models.slice(0, 3).map(mod.supportedReasoningLevels)),
+);
+check(
+  "setAgentReasoning preserves agent formatting",
+  /^ {4}reasoning: max$/m.test(mod.setAgentReasoning(lines, "critic", "max").join("\n")),
+);
 check("parseHarnessDecision ANSWER_ONLY", mod.parseHarnessDecision("Direct.\n\nHARNESS-DECISION: ANSWER_ONLY") === "answer_only");
 check("parseHarnessDecision PIPELINE", mod.parseHarnessDecision("HARNESS-DECISION: PIPELINE") === "pipeline");
 check("parseHarnessDecision no marker -> null", mod.parseHarnessDecision("just text") === null);
@@ -199,12 +242,165 @@ check(
   checks.some((c) => c.label.includes('workflows has an entry for mode "simple"')) &&
     checks.some((c) => c.label.includes("prompt_template file exists")),
 );
+const catalogChecks = await mod.validate(lines, cfgPath, tmp, { getAvailable: () => models, getAll: () => [] });
+check(
+  "validate checks model and supported reasoning against catalog",
+  catalogChecks.filter((c) => !c.ok).length === 0 &&
+    catalogChecks.some((c) => c.label.includes('model is in Pi\'s catalog')) &&
+    catalogChecks.some((c) => c.label.includes("reasoning is supported by its model")),
+  catalogChecks.filter((c) => !c.ok).map((c) => c.label).join("; "),
+);
+const implementerStart = lines.indexOf("  implementer:");
+const deliveryStart = lines.indexOf("  delivery:");
+const invalidEffortLines = lines.map((line, index) =>
+  index > implementerStart && index < deliveryStart && /^ {4}reasoning:/.test(line)
+    ? "    reasoning: xhigh"
+    : line,
+);
+const invalidEffortChecks = await mod.validate(invalidEffortLines, cfgPath, tmp, { getAvailable: () => models, getAll: () => [] });
+check(
+  "validate rejects reasoning unsupported by configured model",
+  invalidEffortChecks.some((c) => c.label === 'agent "implementer" reasoning is supported by its model' && !c.ok),
+);
 check("validate includes context-file check (present)", checks.some((c) => c.label.includes("subagent_context_file") && c.ok));
 await fs.rm(path.join(tmp, "AGENTS-addition.md"));
 const checksMissing = await mod.validate(lines, cfgPath, tmp);
 const missingCheck = checksMissing.find((c) => c.label.includes("subagent_context_file"));
 check("validate: context-file missing -> fail", !!missingCheck && missingCheck.ok === false);
 await fs.copyFile(path.join(ROOT, "AGENTS-addition.md"), path.join(tmp, "AGENTS-addition.md"));
+
+// --- model + effort command ---------------------------------------------------
+const cfgBeforeModelCommand = await fs.readFile(cfgPath, "utf8");
+let explicitSelects = 0;
+const explicitCtx = makeCtx(tmp, true);
+explicitCtx.ui.select = async () => {
+  explicitSelects++;
+  return undefined;
+};
+await commands["harness-model"].handler("implementer opencode-go/gpt-5.1 low", explicitCtx);
+let configured = await fs.readFile(cfgPath, "utf8");
+check(
+  "/harness-model explicit model + effort persists both without reopening a menu",
+  explicitSelects === 0 && configured.includes("    model: opencode-go/gpt-5.1\n    reasoning: low"),
+  configured.slice(configured.indexOf("  implementer:"), configured.indexOf("  implementer:") + 100),
+);
+
+const loopingCtx = makeCtx(tmp, true);
+const loopingTitles = [];
+let loopingAgentMenus = 0;
+loopingCtx.ui.select = async (title, options) => {
+  loopingTitles.push(title);
+  if (title === "Select agent") {
+    loopingAgentMenus++;
+    if (loopingAgentMenus === 1) return options.find((option) => option.startsWith("implementer "));
+    if (loopingAgentMenus === 2) return options.find((option) => option.startsWith("explorer "));
+    return "Cancel";
+  }
+  if (title.includes('Model for "implementer"')) {
+    return options.find((option) => option.startsWith("opencode-go/gpt-5.1"));
+  }
+  if (title.includes('Reasoning effort for "opencode-go/gpt-5.1"')) return "high";
+  if (title.includes('Model for "explorer"')) {
+    return options.find((option) => option.startsWith("opencode-go/deepseek-v4.1-flash"));
+  }
+  return undefined;
+};
+await commands["harness-model"].handler("", loopingCtx);
+configured = await fs.readFile(cfgPath, "utf8");
+check(
+  "/harness-model returns to agent menu after every saved change",
+  loopingAgentMenus === 3 && configured.includes("    model: opencode-go/gpt-5.1\n    reasoning: high") &&
+    configured.includes("    model: opencode-go/deepseek-v4.1-flash\n    reasoning: off"),
+  loopingTitles.join(" -> "),
+);
+
+const beforeMenuCancel = await fs.readFile(cfgPath, "utf8");
+const menuCancelCtx = makeCtx(tmp, true);
+let menuCancelSelects = 0;
+menuCancelCtx.ui.select = async (title, options) => {
+  menuCancelSelects++;
+  return title === "Select agent" && options.includes("Cancel") ? "Cancel" : undefined;
+};
+await commands["harness-model"].handler("", menuCancelCtx);
+check(
+  "/harness-model Cancel closes the agent menu",
+  menuCancelSelects === 1 && (await fs.readFile(cfgPath, "utf8")) === beforeMenuCancel,
+);
+
+const configMenuCtx = makeCtx(tmp, true);
+const configMenuTitles = [];
+configMenuCtx.ui.select = async (title, options) => {
+  configMenuTitles.push(title);
+  if (title === "Corpustory harness configuration") return "3. Change an agent model and effort";
+  if (title === "Select agent" && options.includes("Cancel")) return "Cancel";
+  return undefined;
+};
+await commands["harness-config"].handler("", configMenuCtx);
+check(
+  "/harness-config model option reuses the looping agent menu",
+  JSON.stringify(configMenuTitles) === JSON.stringify(["Corpustory harness configuration", "Select agent"]),
+  configMenuTitles.join(" -> "),
+);
+
+const interactiveCtx = makeCtx(tmp, true);
+const selectionTitles = [];
+interactiveCtx.ui.select = async (title, options) => {
+  selectionTitles.push(title);
+  if (selectionTitles.length === 1) return options.find((option) => option.startsWith("opencode-go/gpt-5.1"));
+  return options.find((option) => option === "high" || option === "high (current)");
+};
+await commands["harness-model"].handler("implementer", interactiveCtx);
+configured = await fs.readFile(cfgPath, "utf8");
+check(
+  "/harness-model menu asks for model then supported effort",
+  selectionTitles.length === 2 && /Reasoning effort for "opencode-go\/gpt-5.1"/.test(selectionTitles[1]) &&
+    configured.includes("    model: opencode-go/gpt-5.1\n    reasoning: high"),
+  selectionTitles.join(" -> "),
+);
+
+await commands["harness-model"].handler("explorer opencode-go/deepseek-v4.1-flash", makeCtx(tmp, true));
+configured = await fs.readFile(cfgPath, "utf8");
+check(
+  "/harness-model non-reasoning model stores off without a second picker",
+  configured.includes("    model: opencode-go/deepseek-v4.1-flash\n    reasoning: off"),
+);
+
+const beforeCancelledEffort = await fs.readFile(cfgPath, "utf8");
+const cancelledCtx = makeCtx(tmp, true);
+let cancelledSelects = 0;
+cancelledCtx.ui.select = async (_title, options) => {
+  cancelledSelects++;
+  return cancelledSelects === 1 ? options.find((option) => option.startsWith("opencode-go/gpt-5.1")) : undefined;
+};
+await commands["harness-model"].handler("implementer", cancelledCtx);
+check(
+  "/harness-model effort cancellation leaves config unchanged",
+  cancelledSelects === 2 && (await fs.readFile(cfgPath, "utf8")) === beforeCancelledEffort,
+);
+
+const beforeInvalidEffort = await fs.readFile(cfgPath, "utf8");
+await commands["harness-model"].handler("explorer opencode-go/deepseek-v4.1-flash high", makeCtx(tmp, true));
+check(
+  "/harness-model rejects unsupported effort atomically",
+  (await fs.readFile(cfgPath, "utf8")) === beforeInvalidEffort && notifies.at(-1)?.includes("not supported"),
+  notifies.at(-1) ?? "",
+);
+await fs.writeFile(cfgPath, cfgBeforeModelCommand);
+
+// --- on-demand delivery command ------------------------------------------------
+const cfgBeforeDelivery = await fs.readFile(cfgPath, "utf8");
+reset();
+const deliveryCommandCtx = makeCtx(tmp, true);
+deliveryCommandCtx.waitForIdle = async () => new Promise((r) => setTimeout(r, 100));
+await commands["harness-delivery"].handler("deliver the pending docs", deliveryCommandCtx);
+await new Promise((r) => setTimeout(r, 150));
+check(
+  "/harness-delivery runs only delivery without changing workflow mode",
+  sent.length === 1 && sent[0]?.includes("prompts/delivery.md") && !sent[0]?.includes("prompts/orchestrator.md") &&
+    (await fs.readFile(cfgPath, "utf8")) === cfgBeforeDelivery,
+  `sent=${sent.length}; mode=${(await fs.readFile(cfgPath, "utf8")).match(/^ {2}workflow_mode: .*$/m)?.[0] ?? "missing"}`,
+);
+reset();
 
 // --- pipeline (explicit command path) ---------------------------------------
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "add a dark mode toggle", waitTurn);
@@ -234,7 +430,11 @@ check(
   JSON.stringify(setModelCalls),
 );
 check("pipeline: original model restored", setModelCalls.at(-1) === "orig-p/orig", JSON.stringify(setModelCalls));
-check("pipeline: thinking set per step", thinkingCalls.length >= 2, JSON.stringify(thinkingCalls));
+check(
+  "pipeline: configured effort set per step",
+  thinkingCalls.includes("medium") && thinkingCalls.includes("high"),
+  JSON.stringify(thinkingCalls),
+);
 check("pipeline: thinking restored to original", thinkingCalls.at(-1) === "high", JSON.stringify(thinkingCalls));
 check(
   "pipeline: step1 shows no invented total, step2 shows 2/2",
@@ -244,6 +444,34 @@ check(
 );
 check("pipeline: footer ends at mode + auto", statuses.at(-1) === "harness: simple · auto: on", String(statuses.at(-1)));
 check("pipeline: finished info (report present, no repair)", notifies.some((n) => n.includes('Pipeline "simple" finished: orchestrator -> implementer')), notifies.join(" | "));
+
+reset();
+const implementerReasoningBlock = /(^  implementer:\n    model: )opencode-go\/gpt-5\.1(\n    reasoning: )high/m;
+const cfgUnsupportedEffort = cfgText.replace(
+  implementerReasoningBlock,
+  "$1opencode-go/deepseek-v4.1-flash$2high",
+);
+await fs.writeFile(cfgPath, cfgUnsupportedEffort);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "unsupported effort", waitTurn);
+check(
+  "pipeline: unsupported model effort warns and is not applied",
+  JSON.stringify(thinkingCalls) === JSON.stringify(["medium", "high"]) &&
+    notifies.some((n) => n.includes('effort "high" is not supported') && n.includes("available: off")),
+  JSON.stringify({ thinkingCalls, notifies }),
+);
+const cfgOffEffort = cfgText.replace(
+  implementerReasoningBlock,
+  "$1opencode-go/deepseek-v4.1-flash$2off",
+);
+await fs.writeFile(cfgPath, cfgOffEffort);
+reset();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "off effort", waitTurn);
+check(
+  "pipeline: off effort still restores original thinking level",
+  JSON.stringify(thinkingCalls) === JSON.stringify(["medium", "high"]),
+  JSON.stringify(thinkingCalls),
+);
+await fs.writeFile(cfgPath, cfgText);
 
 // --- footer refresh: session_start + /harness-auto toggle --------------------
 await events["session_start"]({}, makeCtx(tmp, false));
@@ -356,6 +584,12 @@ check(
   argvMin.length === 5 && argvMin.at(-1) === "q?" && !argvMin.includes("--model") && !argvMin.includes("--append-system-prompt"),
   argvMin.join(" "),
 );
+const argvOff = mod.buildDispatchArgs({ model: "p/no-reasoning", thinking: "off", brief: "q?" });
+check(
+  "buildDispatchArgs accepts off for non-reasoning models",
+  JSON.stringify(argvOff) === JSON.stringify(["--mode", "json", "-p", "--no-session", "--model", "p/no-reasoning", "--thinking", "off", "q?"]),
+  argvOff.join(" "),
+);
 
 const makeSpawn = ({ text, code, stderrText, stopReason }) => () => ({
   stdout: {
@@ -412,6 +646,17 @@ check("dispatch: unknown agent rejected", rUnknown.isError === true && rUnknown.
 
 const rEmpty = await tool.execute("t3", { tasks: [{ agent: "explorer", brief: "   " }] }, undefined, undefined, makeCtx(tmp, false));
 check("dispatch: empty brief rejected", rEmpty.isError === true && rEmpty.content[0].text.toLowerCase().includes("empty brief"), rEmpty.content[0].text);
+
+const cfgUnsupported = cfgOriginal
+  .replace("    model: opencode-go/gpt-5.1\n    reasoning: high", "    model: opencode-go/deepseek-v4.1-flash\n    reasoning: high");
+await fs.writeFile(cfgPath, cfgUnsupported);
+const rUnsupported = await tool.execute("t5", { tasks: [{ agent: "explorer", brief: "x" }] }, undefined, undefined, makeCtx(tmp, false));
+check(
+  "dispatch: unsupported model effort rejected",
+  rUnsupported.isError === true && rUnsupported.content[0].text.includes("not supported") && rUnsupported.content[0].text.includes("Available: off"),
+  rUnsupported.content[0].text,
+);
+await fs.writeFile(cfgPath, cfgOriginal);
 
 const noUiCtx = makeCtx(tmp, false);
 noUiCtx.hasUI = false;

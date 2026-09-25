@@ -26,8 +26,10 @@ Two ways to adopt it:
   selects an ordered list of agent steps; the runtime sequences them, so steps
   cannot be skipped. Modes: `simple`, `full-dry-run`, `full`,
   `implementation-only`, `delivery-only` (see `defaults.workflow_mode`).
-- Commands: `/harness-config`, `/harness-mode`, `/harness-model`,
-  `/harness-run <task>`, `/harness-auto [on|off]`.
+- Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
+  supported reasoning effort), `/harness-run <task>`, `/harness-delivery
+  [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
+  delivery agent without changing `defaults.workflow_mode`.
 - The orchestrator ends every turn with exactly one marker:
   `HARNESS-DECISION: ANSWER_ONLY` (questions and tasks that change no files —
   the pipeline stops) or `HARNESS-DECISION: PIPELINE` (files must change).
@@ -38,6 +40,9 @@ Two ways to adopt it:
   If the marker is missing, the harness sends one repair turn.
 - Reports are evidence-based: name the files changed, the checks actually run,
   and every check that could not be run.
+- The harness performs an advisory repository preflight before a pipeline. Warn
+  the user about uncommitted changes, branch divergence, or an open pull
+  request; do not claim the repository is clean when it is not.
 
 ## Memory — Engram
 

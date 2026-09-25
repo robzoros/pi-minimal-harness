@@ -5,8 +5,9 @@
  *
  *   /harness-config   configuration menu (mode, models, validation, auto-harness)
  *   /harness-mode     pick the default workflow mode (menu or direct argument)
- *   /harness-model    pick an agent model from Pi's catalog (menu or arguments)
+ *   /harness-model    pick an agent model and effort from Pi's catalog (menu or arguments)
  *   /harness-run      run a task through the workflow pipeline (forced sequence)
+ *   /harness-delivery deliver the current changes without changing workflow mode
  *   /harness-auto     show/toggle auto-harness (plain requests run the pipeline)
  *
  * Plus an `input` hook: when `defaults.auto_harness` is true, any plain
@@ -25,10 +26,11 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 const MODES: Array<{ id: string; steps: string; when: string }> = [
   { id: "simple", steps: "orchestrator -> implementer", when: "small and clear changes" },
@@ -42,9 +44,12 @@ const REQUIRED_AGENTS = ["orchestrator", "explorer", "critic", "implementer", "d
 const STATUS_KEY = "corpustory-harness-mode";
 const DISPATCH_WIDGET_KEY = "corpustory-harness-dispatch";
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+const EXTENDED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const REPOSITORY_COMMAND_TIMEOUT_MS = 2000;
 
 type PiModel = Parameters<ExtensionAPI["setModel"]>[0];
 type ThinkingLevelArg = Parameters<ExtensionAPI["setThinkingLevel"]>[0];
+type ReasoningLevelArg = ThinkingLevelArg | "off";
 
 /** Last orchestrator decision recorded for this runtime (shown in the footer). */
 let lastDecision: HarnessDecision = null;
@@ -240,19 +245,36 @@ export function getWorkflowSteps(lines: string[], mode: string): string[] | null
   return steps;
 }
 
-export function setAgentModel(lines: string[], agent: string, model: string): string[] {
+function setAgentFields(lines: string[], agent: string, fields: Record<string, string>): string[] {
   const block = agentBlock(lines, agent);
   if (!block) return lines;
   const next = [...lines];
-  const pattern = /^ {4}model:\s*.*$/;
-  for (let i = block.start; i < block.end; i++) {
-    if (pattern.test(next[i])) {
-      next[i] = `    model: ${model}`;
-      return next;
+  const missing: string[] = [];
+  for (const [field, value] of Object.entries(fields)) {
+    const pattern = new RegExp(`^ {4}${field}:\\s*.*$`);
+    let found = false;
+    for (let i = block.start; i < block.end; i++) {
+      if (pattern.test(next[i])) {
+        next[i] = `    ${field}: ${value}`;
+        found = true;
+        break;
+      }
     }
+    if (!found) missing.push(`    ${field}: ${value}`);
   }
-  next.splice(block.start + 1, 0, `    model: ${model}`);
+  if (missing.length > 0) {
+    const modelIndex = next.findIndex((line, index) => index > block.start && index < block.end && /^ {4}model:\s*/.test(line));
+    next.splice(modelIndex >= 0 ? modelIndex + 1 : block.start + 1, 0, ...missing);
+  }
   return next;
+}
+
+export function setAgentModel(lines: string[], agent: string, model: string): string[] {
+  return setAgentFields(lines, agent, { model });
+}
+
+export function setAgentReasoning(lines: string[], agent: string, reasoning: string): string[] {
+  return setAgentFields(lines, agent, { reasoning });
 }
 
 /** Read a boolean flag from the `defaults:` section, with a fallback. */
@@ -370,6 +392,21 @@ export function findModelRef(ref: string, catalog: ModelCatalog): PiModel | unde
   return all.find((m) => `${m.provider}/${m.id}` === ref) ?? all.find((m) => m.id === ref);
 }
 
+/**
+ * Reasoning efforts assignable for a model. Pi exposes `off` for non-reasoning
+ * models; reasoning models use the provider-neutral levels accepted by the
+ * extension API, with xhigh/max enabled only when the model maps them.
+ */
+export function supportedReasoningLevels(model: PiModel): ReasoningLevelArg[] {
+  if (!model.reasoning) return ["off"];
+  return EXTENDED_THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
 type HarnessDecision = "answer_only" | "pipeline" | null;
 
 /** Parse the orchestrator's mandatory decision marker from an assistant reply. */
@@ -437,6 +474,124 @@ async function pollIdle(ctx: ExtensionContext): Promise<void> {
   }
 }
 
+export interface RepositoryState {
+  available: boolean;
+  dirty: boolean;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  pullRequest: { state: string; number: number; url: string } | null;
+}
+
+type RepositoryCommandResult = { ok: boolean; stdout: string };
+type RepositoryCommandRunner = (
+  command: string,
+  args: string[],
+  cwd: string,
+) => Promise<RepositoryCommandResult>;
+
+const execFileAsync = promisify(execFile);
+
+async function runRepositoryCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<RepositoryCommandResult> {
+  try {
+    const result = await execFileAsync(command, args, {
+      cwd,
+      timeout: REPOSITORY_COMMAND_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    return { ok: true, stdout: String(result.stdout ?? "") };
+  } catch (error) {
+    const stdout =
+      typeof error === "object" && error !== null && "stdout" in error
+        ? String((error as { stdout?: unknown }).stdout ?? "")
+        : "";
+    return { ok: false, stdout };
+  }
+}
+
+/**
+ * Read local repository state without changing the worktree. Git is advisory:
+ * repositories without Git simply skip the preflight. GitHub CLI is optional;
+ * when available, an open PR is reported as a warning for the operator.
+ */
+export async function checkRepositoryState(
+  cwd: string,
+  runner: RepositoryCommandRunner = runRepositoryCommand,
+): Promise<RepositoryState> {
+  const inside = await runner("git", ["rev-parse", "--show-toplevel"], cwd);
+  if (!inside.ok) {
+    return {
+      available: false,
+      dirty: false,
+      branch: null,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      pullRequest: null,
+    };
+  }
+
+  const status = await runner("git", ["status", "--porcelain"], cwd);
+  const branchResult = await runner("git", ["branch", "--show-current"], cwd);
+  const branch = branchResult.ok ? branchResult.stdout.trim() || null : null;
+  const upstreamResult = await runner("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd);
+  const upstream = upstreamResult.ok ? upstreamResult.stdout.trim() || null : null;
+  let ahead = 0;
+  let behind = 0;
+  if (upstream) {
+    const counts = await runner("git", ["rev-list", "--left-right", "--count", "HEAD...@{u}"], cwd);
+    const match = counts.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+    if (counts.ok && match) {
+      ahead = Number(match[1]);
+      behind = Number(match[2]);
+    }
+  }
+
+  let pullRequest: RepositoryState["pullRequest"] = null;
+  if (branch) {
+    const pr = await runner("gh", ["pr", "view", "--json", "state,number,url"], cwd);
+    if (pr.ok) {
+      try {
+        const parsed = JSON.parse(pr.stdout) as { state?: string; number?: number; url?: string };
+        if (parsed.state && parsed.number && parsed.url) {
+          pullRequest = { state: parsed.state, number: parsed.number, url: parsed.url };
+        }
+      } catch {
+        // GitHub CLI output is advisory; malformed output means no PR warning.
+      }
+    }
+  }
+
+  return {
+    available: true,
+    dirty: status.ok && status.stdout.trim().length > 0,
+    branch,
+    upstream,
+    ahead,
+    behind,
+    pullRequest,
+  };
+}
+
+/** Human-readable preflight warning; null means the repository looks ready. */
+export function formatRepositoryPreflight(state: RepositoryState): string | null {
+  if (!state.available) return null;
+  const warnings: string[] = [];
+  if (state.dirty) warnings.push("the working tree has uncommitted changes");
+  if (state.behind > 0) warnings.push(`the branch is behind ${state.upstream ?? "its upstream"} by ${state.behind} commit(s)`);
+  if (state.ahead > 0) warnings.push(`the branch has ${state.ahead} unpushed commit(s)`);
+  if (state.pullRequest?.state === "OPEN") {
+    warnings.push(`pull request #${state.pullRequest.number} is still open (${state.pullRequest.url})`);
+  }
+  if (warnings.length === 0) return null;
+  return `Repository preflight: ${warnings.join("; ")}. Consider pulling, pushing, or resolving the pull request before starting another task.`;
+}
+
 /**
  * Execute the configured workflow pipeline for `task`, step by step.
  * The runtime sequences the steps: each agent's prompt is sent as the next
@@ -447,6 +602,8 @@ export async function runPipeline(
   ctx: ExtensionContext,
   task: string,
   waitForTurn: () => Promise<void>,
+  modeOverride?: string,
+  agentOverride?: string,
 ): Promise<void> {
   const configPath = await resolveConfigPath(ctx.cwd);
   if (!configPath) {
@@ -454,16 +611,18 @@ export async function runPipeline(
     return;
   }
   const lines = await readLines(configPath);
-  const mode = getWorkflowMode(lines);
+  const mode = modeOverride ?? getWorkflowMode(lines);
   if (!mode) {
     ctx.ui.notify("defaults.workflow_mode is not set in the harness configuration.", "error");
     return;
   }
-  const steps = getWorkflowSteps(lines, mode);
+  const steps = agentOverride ? [agentOverride] : getWorkflowSteps(lines, mode);
   if (!steps || steps.length === 0) {
     ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
     return;
   }
+  const repositoryWarning = formatRepositoryPreflight(await checkRepositoryState(ctx.cwd));
+  if (repositoryWarning) ctx.ui.notify(repositoryWarning, "warning");
 
   const originalModel = ctx.model;
   const originalThinking = pi.getThinkingLevel();
@@ -490,12 +649,15 @@ export async function runPipeline(
 
       // Model for this step (exact catalog reference; never invented).
       const modelRef = getBlockField(lines, block, "model");
+      let model: PiModel | undefined;
+      let modelActive = false;
       if (modelRef) {
-        const model = findModelRef(modelRef, ctx.modelRegistry);
+        model = findModelRef(modelRef, ctx.modelRegistry);
         if (!model) {
           ctx.ui.notify(`[${i + 1}/${steps.length}] ${agentName}: model "${modelRef}" not in catalog; keeping current model.`, "warning");
         } else {
           const ok = await pi.setModel(model);
+          modelActive = ok;
           touchedModel = true;
           if (!ok) {
             ctx.ui.notify(`[${i + 1}/${steps.length}] ${agentName}: no authentication for "${modelRef}"; keeping current model.`, "warning");
@@ -503,11 +665,28 @@ export async function runPipeline(
         }
       }
 
-      // Reasoning level for this step.
+      // Reasoning effort must be supported by the model that is actually active.
       const reasoning = getBlockField(lines, block, "reasoning");
-      if (reasoning && THINKING_LEVELS.has(reasoning)) {
+      if (reasoning && model) {
+        const supported = supportedReasoningLevels(model);
+        if (!supported.includes(reasoning as ReasoningLevelArg)) {
+          ctx.ui.notify(
+            `[${i + 1}/${steps.length}] ${agentName}: effort "${reasoning}" is not supported by "${modelRef}"; available: ${supported.join(", ")}. Keeping current effort.`,
+            "warning",
+          );
+        } else if (reasoning === "off" && modelActive) {
+          // Model switches can clamp the active level; restore it in finally.
+          touchedThinking = true;
+        } else if (reasoning !== "off" && modelActive) {
+          pi.setThinkingLevel(reasoning as ThinkingLevelArg);
+          touchedThinking = true;
+        }
+      } else if (reasoning && !modelRef && THINKING_LEVELS.has(reasoning)) {
+        // Backward-compatible agents without a model use Pi's current model.
         pi.setThinkingLevel(reasoning as ThinkingLevelArg);
         touchedThinking = true;
+      } else if (reasoning && modelRef) {
+        ctx.ui.notify(`[${i + 1}/${steps.length}] ${agentName}: cannot validate effort "${reasoning}" because the model is not in the catalog.`, "warning");
       }
 
       // Prompt template for this step (missing configuration stops the run).
@@ -901,7 +1080,12 @@ interface Check {
   detail?: string;
 }
 
-export async function validate(lines: string[], configPath?: string, cwd?: string): Promise<Check[]> {
+export async function validate(
+  lines: string[],
+  configPath?: string,
+  cwd?: string,
+  modelCatalog?: ModelCatalog,
+): Promise<Check[]> {
   const checks: Check[] = [];
 
   const mode = getWorkflowMode(lines);
@@ -918,8 +1102,26 @@ export async function validate(lines: string[], configPath?: string, cwd?: strin
 
   for (const agent of agents) {
     const block = agentBlock(lines, agent);
-    const model = block ? getBlockField(lines, block, "model") : null;
-    checks.push({ label: `agent "${agent}" has a model`, ok: !!model, detail: model ?? "(missing)" });
+    const modelRef = block ? getBlockField(lines, block, "model") : null;
+    checks.push({ label: `agent "${agent}" has a model`, ok: !!modelRef, detail: modelRef ?? "(missing)" });
+    const reasoning = block ? getBlockField(lines, block, "reasoning") : null;
+    checks.push({ label: `agent "${agent}" has reasoning`, ok: !!reasoning, detail: reasoning ?? "(missing)" });
+    if (modelCatalog && modelRef) {
+      const model = findModelRef(modelRef, modelCatalog);
+      checks.push({
+        label: `agent "${agent}" model is in Pi's catalog`,
+        ok: !!model,
+        detail: model ? `${model.provider}/${model.id}` : modelRef,
+      });
+      if (model && reasoning) {
+        const available = supportedReasoningLevels(model);
+        checks.push({
+          label: `agent "${agent}" reasoning is supported by its model`,
+          ok: available.includes(reasoning as ReasoningLevelArg),
+          detail: `configured: ${reasoning}; available: ${available.join(", ")}`,
+        });
+      }
+    }
     const template = block ? getBlockField(lines, block, "prompt_template") : null;
     checks.push({ label: `agent "${agent}" has a prompt_template`, ok: !!template, detail: template ?? "(missing)" });
   }
@@ -1011,55 +1213,52 @@ async function pickMode(ctx: ExtensionCommandContext, configPath: string): Promi
   ctx.ui.notify(`defaults.workflow_mode set to "${mode}"`, "info");
 }
 
-async function pickAgentModel(
+async function pickAgentModelOnce(
   ctx: ExtensionCommandContext,
   configPath: string,
-  presetAgent?: string,
+  agent: string,
   presetModel?: string,
-): Promise<void> {
+  presetReasoning?: string,
+): Promise<boolean> {
   const lines = await readLines(configPath);
   const agents = listAgents(lines);
   if (agents.length === 0) {
     ctx.ui.notify("No agents found in the configuration.", "error");
-    return;
-  }
-
-  let agent = presetAgent;
-  if (!agent) {
-    const choice = await ctx.ui.select(
-      "Select agent",
-      agents.map((a) => {
-        const block = agentBlock(lines, a);
-        const model = block ? getBlockField(lines, block, "model") : null;
-        return model ? `${a} (${model})` : a;
-      }),
-    );
-    if (!choice) return;
-    agent = choice.replace(/\s*\(.*\)\s*$/, "");
+    return false;
   }
   if (!agents.includes(agent)) {
     ctx.ui.notify(`Unknown agent "${agent}". Available: ${agents.join(", ")}`, "error");
-    return;
+    return false;
   }
 
+  const currentReasoning = (() => {
+    const block = agentBlock(lines, agent);
+    return block ? getBlockField(lines, block, "reasoning") : null;
+  })();
   let model = presetModel;
-  if (!model) {
+  let pickedModel: PiModel | undefined;
+  if (model) {
+    pickedModel = findModelRef(model, ctx.modelRegistry);
+    if (!pickedModel) {
+      ctx.ui.notify(`Model "${model}" is not in Pi's catalog. Run /models; the configuration was not changed.`, "error");
+      return false;
+    }
+    model = `${pickedModel.provider}/${pickedModel.id}`;
+  } else {
     const block = agentBlock(lines, agent);
     const current = block ? getBlockField(lines, block, "model") : null;
-
-    type CatalogEntry = { id: string; name: string; provider: string };
     const registry = ctx.modelRegistry;
-    let catalog: CatalogEntry[] = registry.getAvailable();
+    let catalog = registry.getAvailable();
     if (catalog.length === 0) catalog = registry.getAll();
     if (catalog.length === 0) {
       ctx.ui.notify("No models in the catalog. Run /models and check provider authentication.", "error");
-      return;
+      return false;
     }
 
     const sorted = [...catalog].sort((a, b) =>
       a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider),
     );
-    const byOption = new Map<string, CatalogEntry>();
+    const byOption = new Map<string, PiModel>();
     const options = sorted.map((m) => {
       const ref = `${m.provider}/${m.id}`;
       const label = m.name && m.name !== m.id ? `${ref} — ${m.name}` : ref;
@@ -1073,14 +1272,72 @@ async function pickAgentModel(
       ? `Model for "${agent}" — catalog (current: ${current})`
       : `Model for "${agent}" — available models (${catalog.length})`;
     const choice = await ctx.ui.select(title, options);
-    if (!choice) return;
-    const picked = byOption.get(choice);
-    if (!picked) return;
-    model = `${picked.provider}/${picked.id}`;
+    if (!choice) return false;
+    pickedModel = byOption.get(choice);
+    if (!pickedModel) return false;
+    model = `${pickedModel.provider}/${pickedModel.id}`;
   }
 
-  await writeLines(configPath, setAgentModel(lines, agent, model));
-  ctx.ui.notify(`agents.${agent}.model set to "${model}"`, "info");
+  if (!pickedModel) return false;
+  const available = supportedReasoningLevels(pickedModel);
+  let reasoning = presetReasoning;
+  if (reasoning && !available.includes(reasoning as ReasoningLevelArg)) {
+    ctx.ui.notify(
+      `Effort "${reasoning}" is not supported by "${model}". Available: ${available.join(", ")}. The configuration was not changed.`,
+      "error",
+    );
+    return false;
+  }
+  if (!reasoning) {
+    if (available.length === 1) {
+      reasoning = available[0];
+    } else {
+      const byOption = new Map(available.map((level) => [level === currentReasoning ? `${level} (current)` : level, level]));
+      const choice = await ctx.ui.select(`Reasoning effort for "${model}"`, [...byOption.keys()]);
+      if (!choice) return false;
+      reasoning = byOption.get(choice);
+      if (!reasoning) return false;
+    }
+  }
+
+  await writeLines(configPath, setAgentFields(lines, agent, { model, reasoning }));
+  ctx.ui.notify(`agents.${agent} set to model "${model}" and reasoning "${reasoning}"`, "info");
+  return true;
+}
+
+async function pickAgentModel(
+  ctx: ExtensionCommandContext,
+  configPath: string,
+  presetAgent?: string,
+  presetModel?: string,
+  presetReasoning?: string,
+): Promise<void> {
+  // Explicit arguments are a one-shot operation for scripting and RPC users.
+  if (presetAgent) {
+    await pickAgentModelOnce(ctx, configPath, presetAgent, presetModel, presetReasoning);
+    return;
+  }
+
+  // Interactive selection stays open until a change is saved and the operator
+  // explicitly cancels from the first menu.
+  while (true) {
+    const lines = await readLines(configPath);
+    const agents = listAgents(lines);
+    if (agents.length === 0) {
+      ctx.ui.notify("No agents found in the configuration.", "error");
+      return;
+    }
+    const options = agents.map((agent) => {
+      const block = agentBlock(lines, agent);
+      const model = block ? getBlockField(lines, block, "model") : null;
+      return model ? `${agent} (${model})` : agent;
+    });
+    options.push("Cancel");
+    const choice = await ctx.ui.select("Select agent", options);
+    if (!choice || choice === "Cancel") return;
+    const agent = choice.replace(/\s*\(.*\)\s*$/, "");
+    if (!await pickAgentModelOnce(ctx, configPath, agent)) return;
+  }
 }
 
 async function showConfig(ctx: ExtensionCommandContext, configPath: string): Promise<void> {
@@ -1090,7 +1347,7 @@ async function showConfig(ctx: ExtensionCommandContext, configPath: string): Pro
 
 async function runValidation(ctx: ExtensionCommandContext, configPath: string): Promise<void> {
   const lines = await readLines(configPath);
-  const checks = await validate(lines, configPath, ctx.cwd);
+  const checks = await validate(lines, configPath, ctx.cwd, ctx.modelRegistry);
   const failed = checks.filter((c) => !c.ok);
   if (failed.length === 0) {
     ctx.ui.notify(`Configuration valid: ${checks.length} checks passed.`, "info");
@@ -1106,6 +1363,7 @@ function explainModes(): string {
 function explainModels(): string {
   return [
     "The model picker shows Pi's available model catalog directly — choose from the list.",
+    "After choosing a model, pick a reasoning effort from the levels supported by that model.",
     "Identifiers use the exact Pi format: <provider>/<model-id> (e.g. opencode-go/gpt-5.1).",
     "Run Pi's /models command to browse or refresh the catalog if a model is missing.",
     "Do not invent model IDs and do not substitute a different model silently.",
@@ -1128,7 +1386,7 @@ function explainAutoHarness(on: boolean): string {
 const CONFIG_MENU = [
   "1. Show current configuration",
   "2. Change workflow mode",
-  "3. Change an agent model",
+  "3. Change an agent model and effort",
   "4. Validate configuration",
   "5. Explain available modes",
   "6. Explain how to choose models with /models",
@@ -1262,7 +1520,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("harness-model", {
-    description: "Set the model of a harness agent (choose from a menu, or pass: <agent> <model-id>)",
+    description: "Set a harness agent's model and effort (menu, or: <agent> <model-id> [effort])",
     handler: async (args, ctx) => {
       if (!requireUI(ctx)) return;
       const configPath = await resolveConfigPath(ctx.cwd);
@@ -1271,11 +1529,11 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         return;
       }
       const parts = args.trim().split(/\s+/).filter(Boolean);
-      if (parts.length >= 2) {
-        await pickAgentModel(ctx, configPath, parts[0], parts.slice(1).join(" "));
-      } else {
-        await pickAgentModel(ctx, configPath, parts[0]);
+      if (parts.length > 3) {
+        ctx.ui.notify("Usage: /harness-model [agent [model-id [effort]]]", "error");
+        return;
       }
+      await pickAgentModel(ctx, configPath, parts[0], parts[1], parts[2]);
     },
   });
 
@@ -1297,6 +1555,26 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         await runPipeline(pi, ctx, task, () => ctx.waitForIdle());
       } catch (error) {
         ctx.ui.notify(`Pipeline failed: ${String(error)}`, "error");
+      } finally {
+        pipelineRunning = false;
+      }
+    },
+  });
+
+  pi.registerCommand("harness-delivery", {
+    description: "Run the delivery agent without changing defaults.workflow_mode",
+    handler: async (args, ctx) => {
+      if (!requireUI(ctx)) return;
+      if (pipelineRunning) {
+        ctx.ui.notify("A harness pipeline is already running.", "warning");
+        return;
+      }
+      const task = args.trim() || "Deliver the current verified changes.";
+      pipelineRunning = true;
+      try {
+        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), "delivery-only", "delivery");
+      } catch (error) {
+        ctx.ui.notify(`Delivery failed: ${String(error)}`, "error");
       } finally {
         pipelineRunning = false;
       }
@@ -1377,20 +1655,38 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       }
       const prepared: Prepared[] = [];
       const tempDirs: string[] = [];
+      const failPrepared = async (message: string) => {
+        for (const dir of tempDirs) {
+          try {
+            await fs.rm(dir, { recursive: true, force: true });
+          } catch {
+            // best effort cleanup
+          }
+        }
+        return fail(message);
+      };
       for (const task of tasks) {
         const block = agentBlock(lines, task.agent);
         if (!block) {
-          return fail(`Unknown agent "${task.agent}". Available: ${listAgents(lines).join(", ")}`);
+          return failPrepared(`Unknown agent "${task.agent}". Available: ${listAgents(lines).join(", ")}`);
         }
         const brief = (task.brief ?? "").trim();
-        if (!brief) return fail(`Empty brief for agent "${task.agent}".`);
+        if (!brief) return failPrepared(`Empty brief for agent "${task.agent}".`);
         const templateRel = getBlockField(lines, block, "prompt_template");
-        if (!templateRel) return fail(`Agent "${task.agent}" has no prompt_template.`);
+        if (!templateRel) return failPrepared(`Agent "${task.agent}" has no prompt_template.`);
         const templatePath = await resolvePromptTemplatePath(ctx.cwd, configPath, templateRel);
-        if (!templatePath) return fail(`Prompt template not found for "${task.agent}": ${templateRel}`);
+        if (!templatePath) return failPrepared(`Prompt template not found for "${task.agent}": ${templateRel}`);
         const modelRef = getBlockField(lines, block, "model");
         const model = modelRef ? findModelRef(modelRef, ctx.modelRegistry) : undefined;
         const thinking = getBlockField(lines, block, "reasoning");
+        if (modelRef && !model) {
+          return failPrepared(`Agent "${task.agent}" model "${modelRef}" is not in Pi's catalog. Run /models and refresh authentication.`);
+        }
+        if (model && thinking && !supportedReasoningLevels(model).includes(thinking as ReasoningLevelArg)) {
+          return failPrepared(
+            `Agent "${task.agent}" effort "${thinking}" is not supported by "${model.provider}/${model.id}". Available: ${supportedReasoningLevels(model).join(", ")}.`,
+          );
+        }
         const systemPrompt = await composeDispatchSystemPrompt({
           templatePath,
           contractPath,
@@ -1407,7 +1703,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
           args: buildDispatchArgs({
             systemPromptPath,
             model: model ? `${model.provider}/${model.id}` : undefined,
-            thinking: thinking && THINKING_LEVELS.has(thinking) ? thinking : undefined,
+            thinking: thinking && (THINKING_LEVELS.has(thinking) || thinking === "off") ? thinking : undefined,
             brief,
           }),
         });

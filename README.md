@@ -3,7 +3,8 @@
 A minimal, configuration-driven **agent harness for [Pi](https://github.com/earendil-works/pi)**:
 a multi-agent workflow (orchestrator → explorer → critic → implementer →
 delivery) that the Pi runtime executes step by step, with per-agent models,
-prompt templates, interactive slash commands, and evidence-based reports.
+reasoning efforts, prompt templates, interactive slash commands, and
+evidence-based reports.
 
 Drop it into a Pi project, edit one YAML file, and your requests run through a
 workflow you can actually audit.
@@ -32,14 +33,14 @@ workflow you can actually audit.
 | Piece | What it does |
 |---|---|
 | Workflow modes | `simple`, `full-dry-run`, `full`, `implementation-only`, `delivery-only` — ordered agent steps from one YAML |
-| Pipeline driver | Steps run in order as separate turns: model + reasoning + prompt template switched per step |
+| Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
 | Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
 | Report guarantee | The final agent must end with `HARNESS-DONE`; otherwise the harness sends exactly one repair turn |
-| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model`, `/harness-run`, `/harness-auto` |
+| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
-| Smoke tests | `node tests/harness.test.mjs` —73 checks, no network, no real config writes |
+| Smoke tests | `node tests/harness.test.mjs` — 92 checks, no network, no real config writes |
 
 ## Install in your Pi project
 
@@ -77,19 +78,31 @@ your-project/
    of that file). Keep `subagent_context_file: AGENTS-addition.md` in the
    config if you keep the file under that name.
 3. Edit `harness.config.yaml`: set `project:`, pick models **from Pi's
-   `/models` output** (never invent IDs), and set `defaults.workflow_mode`.
+   `/models` output** (never invent IDs), set each agent's supported reasoning
+   effort, and set `defaults.workflow_mode`.
 4. Start Pi in your project and run `/reload`.
 5. Try it: `/harness-mode full-dry-run`, then a plain question (it should stop
    at the orchestrator), then `/harness-run "a small task"`.
 
 **Optional integrations** (both recommended, both independent of the harness):
 
-- **Engram**: install `engram` and `pi-mcp-adapter` packages in
-  Pi's `settings.json`, register `engram mcp --tools=agent` in
-  `~/.pi/agent/mcp.json`. Run engram serve — in normal use engram starts it on
-  demand, but after installing or upgrading engram you must (re)start it yourself,
-  because an already-running server keeps the port and the new binary stays unused.
-  See [`AGENTS-addition.md`](AGENTS-addition.md) for the memory protocol.
+- **Engram**: install the Engram binary on your `PATH`, then let its Pi helper
+  configure the integration:
+
+  ```bash
+  pi install npm:gentle-engram
+  pi install npm:pi-mcp-adapter
+  pi-engram init
+  ```
+
+  Restart Pi (or run `/reload`) afterward. `pi-engram init` writes the package
+  declarations to Pi's `settings.json` and the Engram MCP server to
+  `~/.pi/agent/mcp.json`, including `engram mcp --tools=agent`; it also keeps
+  MCP tools from duplicating Pi's native `mem_*` tools. The Engram binary itself
+  must be installed separately. Normally you do not need to run `engram serve`:
+  Engram starts it on demand. Use `pi-engram init --force` only to replace an
+  existing Engram MCP entry. See [`AGENTS-addition.md`](AGENTS-addition.md) for
+  the memory protocol.
 - **CodeGraph**: `npm i -g codegraph`, then `codegraph init --cwd <repo root>`
   in the project.
 
@@ -111,25 +124,42 @@ workflows:
 agents:
   orchestrator:
     model: provider/model-id     # exact id from /models
-    reasoning: medium            # minimal | low | medium | high | xhigh | max
+    reasoning: medium            # effort supported by the selected model; off for non-reasoning models
     prompt_template: prompts/orchestrator.md
 skills:
   project_directory: .agents/skills
   current: [github-delivery]
 ```
 
+`/harness-model` reads Pi's live model catalog. After choosing a model, it asks
+for an effort only among the levels exposed by that model's provider metadata;
+non-reasoning models are saved as `reasoning: off`. After a successful
+interactive change, the picker returns to the agent menu so several agents can
+be configured in one session; choose `Cancel` there to return to the prompt.
+Explicit argument forms remain one-shot operations. Model and effort are written
+together, so cancelling or choosing an unsupported effort leaves the existing
+configuration unchanged.
+
 Validate any time with `/harness-config` → *Validate configuration* (checks
-modes, agents, models, templates, workflow steps, the contract file and the
-delivery skill).
+modes, agents, catalog model IDs, model-supported reasoning efforts, templates,
+workflow steps, the contract file and the delivery skill).
+
+Before starting a pipeline, the harness performs an advisory repository
+preflight. It warns about uncommitted changes, an upstream branch that is ahead
+or behind, and an open pull request when GitHub CLI is available. The warning
+does not block the task; resolve or synchronize the repository when the warning
+applies. `/harness-delivery` is intended for delivering the current verified
+changes without changing `defaults.workflow_mode`.
 
 ## Commands and markers
 
 | Command / marker | Meaning |
 |---|---|
-| `/harness-config` | Interactive menu: show, set mode, set model, validate, explain |
+| `/harness-config` | Interactive menu: show, set mode, set model + effort, validate, explain |
 | `/harness-mode [mode]` | Show or change `defaults.workflow_mode` |
-| `/harness-model [agent model-id]` | Pick an agent's model from Pi's catalog |
+| `/harness-model [agent [model-id [effort]]]` | Interactively change models/efforts for one or more agents; arguments are one-shot |
 | `/harness-run <task>` | Force the pipeline for one task |
+| `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
 | `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision  |
 | `HARNESS-DONE` | Mandatory last line of every non-orchestrator agent reply |
