@@ -205,8 +205,9 @@ orchestrator -> delivery
 
 ## Configuration Shape
 
-The harness must allow each role to use a different model, tool set, and
-instruction profile.
+The harness must allow each role to use a different model, reasoning effort,
+tool set, and instruction profile. Model and effort remain separate settings so
+the same model can be reused by agents that need different amounts of work.
 
 Agent configuration is mandatory for every role. A workflow must not assume that
 all agents use the same model or the same tools.
@@ -281,11 +282,11 @@ Desired commands:
 /harness mode delivery-only
 
 /harness models
-/harness model set orchestrator <model-id>
-/harness model set explorer <model-id>
-/harness model set critic <model-id>
-/harness model set implementer <model-id>
-/harness model set delivery <model-id>
+/harness model set orchestrator <model-id> [effort]
+/harness model set explorer <model-id> [effort]
+/harness model set critic <model-id> [effort]
+/harness model set implementer <model-id> [effort]
+/harness model set delivery <model-id> [effort]
 
 /harness config show
 /harness config validate
@@ -295,6 +296,14 @@ Desired commands:
 Model selection must use Pi's available model list. The operator should run
 `/models` first, then choose one of the returned model identifiers. The harness
 must not invent model IDs or silently substitute another model.
+
+After selecting a model, the harness must ask for one of the reasoning efforts
+supported by that model according to Pi's catalog metadata. It writes the model
+and `agents.<agent>.reasoning` atomically, rejects unsupported combinations, and
+stores `off` for a model without reasoning. After a successful interactive
+selection, the agent menu is shown again so multiple agents can be configured;
+`Cancel` exits the picker. Pipeline execution and background dispatch must
+validate the same combination before applying it.
 
 Native project commands are registered by `.pi/extensions/harness.ts`:
 `/harness-config`, `/harness-mode`, `/harness-model`, `/harness-run` and
@@ -364,8 +373,8 @@ to perform one recurring operation safely.
 The GitHub delivery agent should use the `github-delivery` skill.
 
 The Pi configuration commands should use the `harness-config` skill. Model
-selection should use the `harness-model` skill. The Pi run commands should use
-the `harness-run` skill.
+selection (model and reasoning effort) should use the `harness-model` skill.
+The Pi run commands should use the `harness-run` skill.
 
 ## Memory Policy
 

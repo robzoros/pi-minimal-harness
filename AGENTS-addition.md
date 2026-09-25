@@ -26,8 +26,9 @@ Two ways to adopt it:
   selects an ordered list of agent steps; the runtime sequences them, so steps
   cannot be skipped. Modes: `simple`, `full-dry-run`, `full`,
   `implementation-only`, `delivery-only` (see `defaults.workflow_mode`).
-- Commands: `/harness-config`, `/harness-mode`, `/harness-model`,
-  `/harness-run <task>`, `/harness-auto [on|off]`.
+- Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
+  supported reasoning effort), `/harness-run <task>`,
+  `/harness-auto [on|off]`.
 - The orchestrator ends every turn with exactly one marker:
   `HARNESS-DECISION: ANSWER_ONLY` (questions and tasks that change no files —
   the pipeline stops) or `HARNESS-DECISION: PIPELINE` (files must change).

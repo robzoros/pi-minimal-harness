@@ -54,9 +54,10 @@ Register one tool, `harness-dispatch`, with the model:
   with the brief as the prompt. Reuse the cross-platform `getPiInvocation`
   logic from Pi's `examples/extensions/subagent/index.ts` (it handles the
   `process.execPath` vs `pi` case on Windows/macOS/Linux).
-- **Model/thinking:** resolved per agent from `harness.config.yaml`
-  (`agents.<name>.model` / `.reasoning`) with the same catalog resolution the
-  pipeline driver already uses; never invent a model id.
+- **Model/effort:** resolved per agent from `harness.config.yaml`
+  (`agents.<name>.model` / `.reasoning`) with the same catalog resolution and
+  model-supported effort validation the pipeline driver uses; never invent a
+  model id or dispatch an unsupported model/effort combination.
 - **Output:** parse the JSON event lines, collect the final assistant text per
   task, cap it at 50 KB per task before returning it to the orchestrator.
 - **Limits:** max 8 tasks, 4 concurrent (same as Pi's subagent example).
