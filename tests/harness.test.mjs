@@ -160,7 +160,7 @@ const reset = () => {
 // --- registration ------------------------------------------------------------
 check(
   "factory registers commands",
-  ["harness-config", "harness-mode", "harness-model", "harness-run", "harness-auto"].every((c) => c in commands),
+  ["harness-config", "harness-mode", "harness-model", "harness-run", "harness-delivery", "harness-auto"].every((c) => c in commands),
   Object.keys(commands).join(","),
 );
 check(
@@ -192,6 +192,26 @@ check(
     mod.findModelRef("gpt-5.1-mini", { getAvailable: () => models, getAll: () => [] })?.id === "gpt-5.1-mini",
 );
 check("findModelRef unknown -> undefined", mod.findModelRef("no/such-model", { getAvailable: () => models, getAll: () => [] }) === undefined);
+const repositoryRunner = async (command, args) => {
+  if (command === "git" && args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, stdout: "/tmp/repo" };
+  if (command === "git" && args[0] === "status") return { ok: true, stdout: " M README.md" };
+  if (command === "git" && args[0] === "branch") return { ok: true, stdout: "feature\n" };
+  if (command === "git" && args[1]?.includes("--abbrev-ref")) return { ok: true, stdout: "origin/feature\n" };
+  if (command === "git" && args[0] === "rev-list") return { ok: true, stdout: "1 2\n" };
+  if (command === "gh") return { ok: true, stdout: JSON.stringify({ state: "OPEN", number: 7, url: "https://github.com/example/repo/pull/7" }) };
+  return { ok: false, stdout: "" };
+};
+const repositoryState = await mod.checkRepositoryState("/tmp/repo", repositoryRunner);
+check(
+  "repository preflight detects dirty, divergent, and open PR state",
+  repositoryState.dirty && repositoryState.ahead === 1 && repositoryState.behind === 2 && repositoryState.pullRequest?.number === 7,
+  JSON.stringify(repositoryState),
+);
+check(
+  "repository preflight warning advises syncing/resolving before work",
+  mod.formatRepositoryPreflight(repositoryState)?.includes("uncommitted") && mod.formatRepositoryPreflight(repositoryState)?.includes("pulling, pushing, or resolving"),
+  mod.formatRepositoryPreflight(repositoryState) ?? "",
+);
 check(
   "supportedReasoningLevels follows model/provider metadata",
   JSON.stringify(mod.supportedReasoningLevels(models[2])) === JSON.stringify(["minimal", "low", "medium", "high", "max"]) &&
@@ -366,6 +386,21 @@ check(
   notifies.at(-1) ?? "",
 );
 await fs.writeFile(cfgPath, cfgBeforeModelCommand);
+
+// --- on-demand delivery command ------------------------------------------------
+const cfgBeforeDelivery = await fs.readFile(cfgPath, "utf8");
+reset();
+const deliveryCommandCtx = makeCtx(tmp, true);
+deliveryCommandCtx.waitForIdle = async () => new Promise((r) => setTimeout(r, 100));
+await commands["harness-delivery"].handler("deliver the pending docs", deliveryCommandCtx);
+await new Promise((r) => setTimeout(r, 150));
+check(
+  "/harness-delivery runs only delivery without changing workflow mode",
+  sent.length === 1 && sent[0]?.includes("prompts/delivery.md") && !sent[0]?.includes("prompts/orchestrator.md") &&
+    (await fs.readFile(cfgPath, "utf8")) === cfgBeforeDelivery,
+  `sent=${sent.length}; mode=${(await fs.readFile(cfgPath, "utf8")).match(/^ {2}workflow_mode: .*$/m)?.[0] ?? "missing"}`,
+);
+reset();
 
 // --- pipeline (explicit command path) ---------------------------------------
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "add a dark mode toggle", waitTurn);

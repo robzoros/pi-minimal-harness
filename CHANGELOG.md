@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The interactive model/effort picker now returns to the agent menu after each
   saved change, with an explicit `Cancel` action; argument-based selection stays
   one-shot.
+- README Engram setup now recommends `pi-engram init` instead of requiring
+  manual Pi and MCP configuration.
+- Add `/harness-delivery` to run the delivery agent without changing the
+  configured workflow mode.
+- Add an advisory repository preflight before pipelines to warn about
+  uncommitted changes, branch divergence, and open pull requests.
 
 ## [0.1.0] - 2026-09-24
 

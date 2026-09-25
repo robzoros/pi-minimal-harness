@@ -7,6 +7,7 @@
  *   /harness-mode     pick the default workflow mode (menu or direct argument)
  *   /harness-model    pick an agent model and effort from Pi's catalog (menu or arguments)
  *   /harness-run      run a task through the workflow pipeline (forced sequence)
+ *   /harness-delivery deliver the current changes without changing workflow mode
  *   /harness-auto     show/toggle auto-harness (plain requests run the pipeline)
  *
  * Plus an `input` hook: when `defaults.auto_harness` is true, any plain
@@ -25,10 +26,11 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 const MODES: Array<{ id: string; steps: string; when: string }> = [
   { id: "simple", steps: "orchestrator -> implementer", when: "small and clear changes" },
@@ -43,6 +45,7 @@ const STATUS_KEY = "corpustory-harness-mode";
 const DISPATCH_WIDGET_KEY = "corpustory-harness-dispatch";
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
 const EXTENDED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const REPOSITORY_COMMAND_TIMEOUT_MS = 2000;
 
 type PiModel = Parameters<ExtensionAPI["setModel"]>[0];
 type ThinkingLevelArg = Parameters<ExtensionAPI["setThinkingLevel"]>[0];
@@ -471,6 +474,124 @@ async function pollIdle(ctx: ExtensionContext): Promise<void> {
   }
 }
 
+export interface RepositoryState {
+  available: boolean;
+  dirty: boolean;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  pullRequest: { state: string; number: number; url: string } | null;
+}
+
+type RepositoryCommandResult = { ok: boolean; stdout: string };
+type RepositoryCommandRunner = (
+  command: string,
+  args: string[],
+  cwd: string,
+) => Promise<RepositoryCommandResult>;
+
+const execFileAsync = promisify(execFile);
+
+async function runRepositoryCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<RepositoryCommandResult> {
+  try {
+    const result = await execFileAsync(command, args, {
+      cwd,
+      timeout: REPOSITORY_COMMAND_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    return { ok: true, stdout: String(result.stdout ?? "") };
+  } catch (error) {
+    const stdout =
+      typeof error === "object" && error !== null && "stdout" in error
+        ? String((error as { stdout?: unknown }).stdout ?? "")
+        : "";
+    return { ok: false, stdout };
+  }
+}
+
+/**
+ * Read local repository state without changing the worktree. Git is advisory:
+ * repositories without Git simply skip the preflight. GitHub CLI is optional;
+ * when available, an open PR is reported as a warning for the operator.
+ */
+export async function checkRepositoryState(
+  cwd: string,
+  runner: RepositoryCommandRunner = runRepositoryCommand,
+): Promise<RepositoryState> {
+  const inside = await runner("git", ["rev-parse", "--show-toplevel"], cwd);
+  if (!inside.ok) {
+    return {
+      available: false,
+      dirty: false,
+      branch: null,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      pullRequest: null,
+    };
+  }
+
+  const status = await runner("git", ["status", "--porcelain"], cwd);
+  const branchResult = await runner("git", ["branch", "--show-current"], cwd);
+  const branch = branchResult.ok ? branchResult.stdout.trim() || null : null;
+  const upstreamResult = await runner("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd);
+  const upstream = upstreamResult.ok ? upstreamResult.stdout.trim() || null : null;
+  let ahead = 0;
+  let behind = 0;
+  if (upstream) {
+    const counts = await runner("git", ["rev-list", "--left-right", "--count", "HEAD...@{u}"], cwd);
+    const match = counts.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+    if (counts.ok && match) {
+      ahead = Number(match[1]);
+      behind = Number(match[2]);
+    }
+  }
+
+  let pullRequest: RepositoryState["pullRequest"] = null;
+  if (branch) {
+    const pr = await runner("gh", ["pr", "view", "--json", "state,number,url"], cwd);
+    if (pr.ok) {
+      try {
+        const parsed = JSON.parse(pr.stdout) as { state?: string; number?: number; url?: string };
+        if (parsed.state && parsed.number && parsed.url) {
+          pullRequest = { state: parsed.state, number: parsed.number, url: parsed.url };
+        }
+      } catch {
+        // GitHub CLI output is advisory; malformed output means no PR warning.
+      }
+    }
+  }
+
+  return {
+    available: true,
+    dirty: status.ok && status.stdout.trim().length > 0,
+    branch,
+    upstream,
+    ahead,
+    behind,
+    pullRequest,
+  };
+}
+
+/** Human-readable preflight warning; null means the repository looks ready. */
+export function formatRepositoryPreflight(state: RepositoryState): string | null {
+  if (!state.available) return null;
+  const warnings: string[] = [];
+  if (state.dirty) warnings.push("the working tree has uncommitted changes");
+  if (state.behind > 0) warnings.push(`the branch is behind ${state.upstream ?? "its upstream"} by ${state.behind} commit(s)`);
+  if (state.ahead > 0) warnings.push(`the branch has ${state.ahead} unpushed commit(s)`);
+  if (state.pullRequest?.state === "OPEN") {
+    warnings.push(`pull request #${state.pullRequest.number} is still open (${state.pullRequest.url})`);
+  }
+  if (warnings.length === 0) return null;
+  return `Repository preflight: ${warnings.join("; ")}. Consider pulling, pushing, or resolving the pull request before starting another task.`;
+}
+
 /**
  * Execute the configured workflow pipeline for `task`, step by step.
  * The runtime sequences the steps: each agent's prompt is sent as the next
@@ -481,6 +602,8 @@ export async function runPipeline(
   ctx: ExtensionContext,
   task: string,
   waitForTurn: () => Promise<void>,
+  modeOverride?: string,
+  agentOverride?: string,
 ): Promise<void> {
   const configPath = await resolveConfigPath(ctx.cwd);
   if (!configPath) {
@@ -488,16 +611,18 @@ export async function runPipeline(
     return;
   }
   const lines = await readLines(configPath);
-  const mode = getWorkflowMode(lines);
+  const mode = modeOverride ?? getWorkflowMode(lines);
   if (!mode) {
     ctx.ui.notify("defaults.workflow_mode is not set in the harness configuration.", "error");
     return;
   }
-  const steps = getWorkflowSteps(lines, mode);
+  const steps = agentOverride ? [agentOverride] : getWorkflowSteps(lines, mode);
   if (!steps || steps.length === 0) {
     ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
     return;
   }
+  const repositoryWarning = formatRepositoryPreflight(await checkRepositoryState(ctx.cwd));
+  if (repositoryWarning) ctx.ui.notify(repositoryWarning, "warning");
 
   const originalModel = ctx.model;
   const originalThinking = pi.getThinkingLevel();
@@ -1430,6 +1555,26 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         await runPipeline(pi, ctx, task, () => ctx.waitForIdle());
       } catch (error) {
         ctx.ui.notify(`Pipeline failed: ${String(error)}`, "error");
+      } finally {
+        pipelineRunning = false;
+      }
+    },
+  });
+
+  pi.registerCommand("harness-delivery", {
+    description: "Run the delivery agent without changing defaults.workflow_mode",
+    handler: async (args, ctx) => {
+      if (!requireUI(ctx)) return;
+      if (pipelineRunning) {
+        ctx.ui.notify("A harness pipeline is already running.", "warning");
+        return;
+      }
+      const task = args.trim() || "Deliver the current verified changes.";
+      pipelineRunning = true;
+      try {
+        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), "delivery-only", "delivery");
+      } catch (error) {
+        ctx.ui.notify(`Delivery failed: ${String(error)}`, "error");
       } finally {
         pipelineRunning = false;
       }

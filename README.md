@@ -36,11 +36,11 @@ workflow you can actually audit.
 | Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
 | Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
 | Report guarantee | The final agent must end with `HARNESS-DONE`; otherwise the harness sends exactly one repair turn |
-| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-auto` |
+| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
-| Smoke tests | `node tests/harness.test.mjs` — 89 checks, no network, no real config writes |
+| Smoke tests | `node tests/harness.test.mjs` — 92 checks, no network, no real config writes |
 
 ## Install in your Pi project
 
@@ -86,12 +86,23 @@ your-project/
 
 **Optional integrations** (both recommended, both independent of the harness):
 
-- **Engram**: install `engram` and `pi-mcp-adapter` packages in
-  Pi's `settings.json`, register `engram mcp --tools=agent` in
-  `~/.pi/agent/mcp.json`. Run engram serve — in normal use engram starts it on
-  demand, but after installing or upgrading engram you must (re)start it yourself,
-  because an already-running server keeps the port and the new binary stays unused.
-  See [`AGENTS-addition.md`](AGENTS-addition.md) for the memory protocol.
+- **Engram**: install the Engram binary on your `PATH`, then let its Pi helper
+  configure the integration:
+
+  ```bash
+  pi install npm:gentle-engram
+  pi install npm:pi-mcp-adapter
+  pi-engram init
+  ```
+
+  Restart Pi (or run `/reload`) afterward. `pi-engram init` writes the package
+  declarations to Pi's `settings.json` and the Engram MCP server to
+  `~/.pi/agent/mcp.json`, including `engram mcp --tools=agent`; it also keeps
+  MCP tools from duplicating Pi's native `mem_*` tools. The Engram binary itself
+  must be installed separately. Normally you do not need to run `engram serve`:
+  Engram starts it on demand. Use `pi-engram init --force` only to replace an
+  existing Engram MCP entry. See [`AGENTS-addition.md`](AGENTS-addition.md) for
+  the memory protocol.
 - **CodeGraph**: `npm i -g codegraph`, then `codegraph init --cwd <repo root>`
   in the project.
 
@@ -133,6 +144,13 @@ Validate any time with `/harness-config` → *Validate configuration* (checks
 modes, agents, catalog model IDs, model-supported reasoning efforts, templates,
 workflow steps, the contract file and the delivery skill).
 
+Before starting a pipeline, the harness performs an advisory repository
+preflight. It warns about uncommitted changes, an upstream branch that is ahead
+or behind, and an open pull request when GitHub CLI is available. The warning
+does not block the task; resolve or synchronize the repository when the warning
+applies. `/harness-delivery` is intended for delivering the current verified
+changes without changing `defaults.workflow_mode`.
+
 ## Commands and markers
 
 | Command / marker | Meaning |
@@ -141,6 +159,7 @@ workflow steps, the contract file and the delivery skill).
 | `/harness-mode [mode]` | Show or change `defaults.workflow_mode` |
 | `/harness-model [agent [model-id [effort]]]` | Interactively change models/efforts for one or more agents; arguments are one-shot |
 | `/harness-run <task>` | Force the pipeline for one task |
+| `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
 | `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision  |
 | `HARNESS-DONE` | Mandatory last line of every non-orchestrator agent reply |
