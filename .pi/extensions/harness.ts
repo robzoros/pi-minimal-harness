@@ -298,6 +298,25 @@ export function isQuestionShortCircuit(lines: string[]): boolean {
   return getDefaultFlag(lines, "question_short_circuit", true);
 }
 
+/**
+ * When true, a missing or ambiguous decision marker stops the pipeline instead
+ * of being read as "not ANSWER_ONLY" (which would run the file-mutating steps
+ * of a task that only needed an answer).
+ */
+export function isStrictDecisionMarker(lines: string[]): boolean {
+  return getDefaultFlag(lines, "strict_decision_marker", false);
+}
+
+export type PreflightPolicy = "advisory" | "blocking";
+
+/**
+ * `blocking` stops the first file-mutating step when the repository is not in
+ * a known state; `advisory` only reports. Any other value reads as advisory.
+ */
+export function preflightPolicy(lines: string[]): PreflightPolicy {
+  return getDefaultString(lines, "preflight_policy", "advisory").toLowerCase() === "blocking" ? "blocking" : "advisory";
+}
+
 /** Read a string flag from the `defaults:` section, with a fallback. */
 export function getDefaultString(lines: string[], key: string, fallback: string): string {
   const section = topLevelSection(lines, "defaults");
@@ -313,6 +332,18 @@ export function getDefaultString(lines: string[], key: string, fallback: string)
 /** Master gate for the harness-dispatch tool. */
 export function isAllowDispatch(lines: string[]): boolean {
   return getDefaultFlag(lines, "allow_dispatch", true);
+}
+
+/**
+ * Whether an agent's step may modify files, from `agents.<name>.mutates_files`.
+ * An agent without the field is assumed to mutate files: a blocking gate that
+ * failed open on missing configuration would defeat its own purpose.
+ */
+export function agentMutatesFiles(lines: string[], agent: string): boolean {
+  const block = agentBlock(lines, agent);
+  const value = block ? getBlockField(lines, block, "mutates_files") : null;
+  if (!value) return true;
+  return value.toLowerCase() === "true";
 }
 
 export function setAutoHarness(lines: string[], on: boolean): string[] {
@@ -409,11 +440,54 @@ export function supportedReasoningLevels(model: PiModel): ReasoningLevelArg[] {
 
 type HarnessDecision = "answer_only" | "pipeline" | null;
 
+const DECISION_MARKER = /HARNESS-DECISION:\s*(ANSWER_ONLY|PIPELINE)/gi;
+
+export interface DecisionLineSplit {
+  /** null when the reply has no marker on its last line, or names both variants. */
+  decision: HarnessDecision;
+  /** The reply without the decision marker. */
+  rest: string;
+  /** True when a marker was present on the last line, valid or ambiguous. */
+  hadMarker: boolean;
+}
+
+/**
+ * Split the orchestrator's mandatory decision marker off a reply.
+ *
+ * The marker only counts on the last non-empty line: quoted earlier — in prose,
+ * a code fence, or a list of examples — it is an example and must neither decide
+ * nor be removed from the visible text. A final line carrying both variants is
+ * ambiguous, so it yields no decision and the caller fails closed.
+ */
+export function splitDecisionLine(text: string): DecisionLineSplit {
+  const lines = text.split("\n");
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim()) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return { decision: null, rest: text, hadMarker: false };
+
+  const variants = new Set([...lines[idx].matchAll(DECISION_MARKER)].map((m) => m[1].toUpperCase()));
+  if (variants.size === 0) return { decision: null, rest: text, hadMarker: false };
+
+  const decision: HarnessDecision =
+    variants.size === 1 ? ([...variants][0] === "ANSWER_ONLY" ? "answer_only" : "pipeline") : null;
+
+  // The marker never reaches the user, but a sentence sharing the final line
+  // is prose and survives without it.
+  const cleaned = lines[idx].replace(DECISION_MARKER, "").replace(/\s+$/, "");
+  const out = [...lines];
+  if (cleaned.trim()) out[idx] = cleaned;
+  else out.splice(idx, 1);
+  return { decision, rest: out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd(), hadMarker: true };
+}
+
 /** Parse the orchestrator's mandatory decision marker from an assistant reply. */
 export function parseHarnessDecision(text: string): HarnessDecision {
-  const match = text.match(/HARNESS-DECISION:\s*(ANSWER_ONLY|PIPELINE)/i);
-  if (!match) return null;
-  return match[1].toUpperCase() === "ANSWER_ONLY" ? "answer_only" : "pipeline";
+  return splitDecisionLine(text).decision;
 }
 
 interface LastTurn {
@@ -448,10 +522,40 @@ function lastAssistantTurn(ctx: ExtensionContext): LastTurn | null {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** One repair turn, sent when the final agent omits its mandatory report. */
-const REPORT_REPAIR_PROMPT =
-  "The previous response ended without the completion marker `HARNESS-DONE` and without the report in the required format (### Changes / ### Evidence / ### Notes for delivery). " +
-  "Emit the full final report now, ending with `HARNESS-DONE`.";
+/**
+ * One repair turn, sent when a step omits its mandatory report. The agent name
+ * is included so a stalled step is identifiable in the transcript.
+ */
+function reportRepairPrompt(agentName: string): string {
+  return (
+    `The previous response from "${agentName}" ended without the completion marker \`HARNESS-DONE\` and without the report in the required format (### Changes / ### Evidence / ### Notes for delivery). ` +
+    "Emit the full final report now, ending with `HARNESS-DONE`."
+  );
+}
+
+/**
+ * Ask whether a file-mutating step may run anyway. Without a TUI there is
+ * nobody to ask, so the step is blocked: continuing silently is exactly the
+ * failure mode this gate exists to prevent.
+ */
+async function confirmPreflightBlock(
+  ctx: ExtensionContext,
+  blockers: string[],
+  agentName: string,
+): Promise<boolean> {
+  const detail = blockers.join("; ");
+  if (!ctx.hasUI) {
+    ctx.ui.notify(
+      `Pipeline blocked before "${agentName}": ${detail}. Resolve it and run the task again (or set defaults.preflight_policy: advisory).`,
+      "error",
+    );
+    return false;
+  }
+  return await ctx.ui.confirm(
+    `Run "${agentName}" anyway?`,
+    `${detail}.\n\nThe next step may modify files on top of this state. Default is to stop: resolve it and run the task again.`,
+  );
+}
 
 /**
  * Turn wait for the auto-harness `input` hook, where ctx.waitForIdle() is not
@@ -593,6 +697,22 @@ export function formatRepositoryPreflight(state: RepositoryState): string | null
 }
 
 /**
+ * Conditions that must stop a file-mutating step under
+ * `defaults.preflight_policy: blocking`. Only states where the harness would
+ * build on top of unknown work qualify: an out-of-date branch is reported as a
+ * warning instead, because pulling is the operator's call, not the harness's.
+ */
+export function formatBlockingPreflight(state: RepositoryState): string[] {
+  if (!state.available) return [];
+  const blockers: string[] = [];
+  if (state.dirty) blockers.push("the working tree has uncommitted changes");
+  if (state.pullRequest?.state === "OPEN") {
+    blockers.push(`pull request #${state.pullRequest.number} is still open (${state.pullRequest.url})`);
+  }
+  return blockers;
+}
+
+/**
  * Execute the configured workflow pipeline for `task`, step by step.
  * The runtime sequences the steps: each agent's prompt is sent as the next
  * user turn and the driver waits for it to finish before continuing.
@@ -621,13 +741,18 @@ export async function runPipeline(
     ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
     return;
   }
-  const repositoryWarning = formatRepositoryPreflight(await checkRepositoryState(ctx.cwd));
+  const repositoryState = await checkRepositoryState(ctx.cwd);
+  const repositoryWarning = formatRepositoryPreflight(repositoryState);
   if (repositoryWarning) ctx.ui.notify(repositoryWarning, "warning");
 
   const originalModel = ctx.model;
   const originalThinking = pi.getThinkingLevel();
   const autoHarness = isAutoHarness(lines);
   const questionShortCircuit = isQuestionShortCircuit(lines);
+  const strictDecisionMarker = isStrictDecisionMarker(lines);
+  // Resolved once: the gate is asked at most one time per pipeline, so a step
+  // that dirties the tree itself does not block the next one.
+  let pendingPreflightBlock = preflightPolicy(lines) === "blocking" ? formatBlockingPreflight(repositoryState) : [];
   lastDecision = null;
   lastProgress = null;
   let touchedModel = false;
@@ -710,6 +835,12 @@ export async function runPipeline(
       // The template body never enters the transcript: this message only
       // points at the file (the agent reads it) and supplies the values the
       // placeholders stand for.
+      if (pendingPreflightBlock.length > 0 && agentMutatesFiles(lines, agentName)) {
+        const blockers = pendingPreflightBlock;
+        pendingPreflightBlock = [];
+        if (!(await confirmPreflightBlock(ctx, blockers, agentName))) break;
+      }
+
       pi.sendUserMessage(
         [
           `[harness] step ${i + 1}/${steps.length} · ${agentName} · mode ${mode}.`,
@@ -731,22 +862,45 @@ export async function runPipeline(
       completed.push(agentName);
 
       // Questions and no-file-change tasks: the orchestrator answered in this
-      // first step, so the remaining pipeline is unnecessary.
+      // first step, so the remaining pipeline is unnecessary. The decision is
+      // read before the report marker below, so a legitimate ANSWER_ONLY answer
+      // is never "repaired" for a report it does not owe.
       const decision = lastDecision ?? parseHarnessDecision(turn?.text ?? "");
-      if (i === 0 && steps.length > 1 && questionShortCircuit && decision === "answer_only") {
-        shortCircuited = true;
-        break;
+      if (i === 0 && steps.length > 1 && questionShortCircuit) {
+        if (decision === "answer_only") {
+          shortCircuited = true;
+          break;
+        }
+        // Fail closed: without a decision the pipeline would guess "PIPELINE" and
+        // let the mutating steps run on a task that may need no file at all.
+        if (decision === null && strictDecisionMarker) {
+          ctx.ui.notify(
+            `Pipeline stopped: the orchestrator's reply has no usable decision marker on its last line. Expected "HARNESS-DECISION: ANSWER_ONLY" or "HARNESS-DECISION: PIPELINE" as the final line. ` +
+              "Re-run the task, or set defaults.strict_decision_marker: false to let the pipeline continue without it.",
+            "error",
+          );
+          break;
+        }
       }
-    }
 
-    // Final-step report guarantee: the last agent must deliver its report.
-    if (completed.length === steps.length && !shortCircuited && lastDecision !== "answer_only") {
-      const finalTurn = lastAssistantTurn(ctx);
-      if (!finalTurn || !/\bHARNESS-DONE\b/.test(finalTurn.text)) {
-        pi.sendUserMessage(REPORT_REPAIR_PROMPT);
-        await waitForTurn();
-        const repaired = lastAssistantTurn(ctx);
-        reportMissing = !repaired || !/\bHARNESS-DONE\b/.test(repaired.text);
+      // Per-step report guarantee: every step that owes a report delivers it.
+      // Step 1 is exempt: the orchestrator's job is the decision plus the
+      // handoff, not the report contract, and asking it for one would cost an
+      // adopter an extra turn on a path that has always worked without it.
+      if (!shortCircuited && decision !== "answer_only" && i > 0) {
+        if (!turn || !/\bHARNESS-DONE\b/.test(turn.text)) {
+          pi.sendUserMessage(reportRepairPrompt(agentName));
+          await waitForTurn();
+          const repaired = lastAssistantTurn(ctx);
+          if (!repaired || !/\bHARNESS-DONE\b/.test(repaired.text)) {
+            reportMissing = true;
+            ctx.ui.notify(
+              `Pipeline stopped: step ${i + 1} (${agentName}) did not emit HARNESS-DONE after one repair turn.`,
+              "error",
+            );
+            break;
+          }
+        }
       }
     }
   } finally {
@@ -766,7 +920,7 @@ export async function runPipeline(
   if (completed.length === steps.length) {
     if (reportMissing) {
       ctx.ui.notify(
-        `Pipeline "${mode}" finished, but the final report is missing — the last agent may have stopped early.`,
+        `Pipeline "${mode}" finished, but a step's report is missing — the last agent may have stopped early.`,
         "warning",
       );
     } else {
@@ -1062,13 +1216,15 @@ export function summarize(lines: string[], configPath: string, cwd: string): str
     `defaults.auto_harness: ${isAutoHarness(lines) ? "true" : "false"}`,
     `defaults.question_short_circuit: ${isQuestionShortCircuit(lines) ? "true" : "false"}`,
     `defaults.allow_dispatch: ${isAllowDispatch(lines) ? "true" : "false"} (context: ${getDefaultString(lines, "subagent_context_file", "AGENTS-addition.md")})`,
+    `defaults.strict_decision_marker: ${isStrictDecisionMarker(lines) ? "true" : "false"}`,
+    `defaults.preflight_policy: ${preflightPolicy(lines)}`,
     "agents:",
   ];
   for (const agent of listAgents(lines)) {
     const block = agentBlock(lines, agent);
     const model = block ? getBlockField(lines, block, "model") ?? "(no model)" : "?";
     const reasoning = block ? getBlockField(lines, block, "reasoning") ?? "-" : "-";
-    out.push(`  ${agent}: ${model} (reasoning: ${reasoning})`);
+    out.push(`  ${agent}: ${model} (reasoning: ${reasoning}; mutates files: ${agentMutatesFiles(lines, agent)})`);
   }
   out.push(`commands.model_catalog_source: ${getCatalogSource(lines) ?? "(missing)"}`);
   return out.join("\n");
@@ -1095,6 +1251,13 @@ export async function validate(
     detail: mode ?? "(missing)",
   });
 
+  const policy = getDefaultString(lines, "preflight_policy", "advisory");
+  checks.push({
+    label: "defaults.preflight_policy is advisory or blocking",
+    ok: policy === "advisory" || policy === "blocking",
+    detail: policy,
+  });
+
   const agents = listAgents(lines);
   for (const required of REQUIRED_AGENTS) {
     checks.push({ label: `agent "${required}" exists`, ok: agents.includes(required) });
@@ -1103,6 +1266,12 @@ export async function validate(
   for (const agent of agents) {
     const block = agentBlock(lines, agent);
     const modelRef = block ? getBlockField(lines, block, "model") : null;
+    const declaresMutation = !!block && !!getBlockField(lines, block, "mutates_files");
+    checks.push({
+      label: `agent "${agent}" declares mutates_files`,
+      ok: declaresMutation,
+      detail: declaresMutation ? String(agentMutatesFiles(lines, agent)) : "(missing; assumed to mutate files)",
+    });
     checks.push({ label: `agent "${agent}" has a model`, ok: !!modelRef, detail: modelRef ?? "(missing)" });
     const reasoning = block ? getBlockField(lines, block, "reasoning") : null;
     checks.push({ label: `agent "${agent}" has reasoning`, ok: !!reasoning, detail: reasoning ?? "(missing)" });
@@ -1415,27 +1584,26 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return {};
     let decision: HarnessDecision = null;
     let changed = false;
-    const content = message.content.map((part) => {
-      if (part.type !== "text" || !part.text) return part;
-      let partChanged = false;
-      const kept: string[] = [];
-      for (const line of part.text.split("\n")) {
-        const match = line.match(/HARNESS-DECISION:\s*(ANSWER_ONLY|PIPELINE)/i);
-        if (match) {
-          decision = decision ?? (match[1].toUpperCase() === "ANSWER_ONLY" ? "answer_only" : "pipeline");
-          partChanged = true;
-          changed = true;
-          continue;
-        }
-        kept.push(line);
-      }
-      if (!partChanged) return part;
-      return { ...part, text: kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() };
-    });
-    if (!changed || decision === null) return {};
-    lastDecision = decision;
-    lastProgress = await computeDecisionProgress(ctx, decision);
-    await refreshModeStatus(ctx);
+    const content = message.content.map((part) => part);
+    // Only the last text part can carry the decision line. A marker quoted
+    // earlier belongs to the prose and is left visible: stripping it would
+    // delete the sentence the model wrote and let the example decide.
+    for (let p = content.length - 1; p >= 0; p--) {
+      const part = content[p];
+      if (part?.type !== "text" || !part.text) continue;
+      const split = splitDecisionLine(part.text);
+      if (!split.hadMarker) continue;
+      decision = split.decision;
+      changed = true;
+      content[p] = { ...part, text: split.rest };
+      break;
+    }
+    if (!changed) return {};
+    if (decision !== null) {
+      lastDecision = decision;
+      lastProgress = await computeDecisionProgress(ctx, decision);
+      await refreshModeStatus(ctx);
+    }
     return { message: { ...message, content } as unknown as typeof event.message };
   });
 

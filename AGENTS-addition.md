@@ -30,19 +30,25 @@ Two ways to adopt it:
   supported reasoning effort), `/harness-run <task>`, `/harness-delivery
   [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
   delivery agent without changing `defaults.workflow_mode`.
-- The orchestrator ends every turn with exactly one marker:
+- The orchestrator ends every turn with exactly one marker, on the **last
+  non-empty line** of its reply:
   `HARNESS-DECISION: ANSWER_ONLY` (questions and tasks that change no files —
   the pipeline stops) or `HARNESS-DECISION: PIPELINE` (files must change).
-  The harness moves the marker to the footer; it is not part of the visible
-  answer.
+  A marker quoted earlier in the reply is an example, not a decision. The
+  harness moves the marker to the footer; it is not part of the visible
+  answer. With `defaults.strict_decision_marker` on, a reply with no usable
+  marker stops the pipeline instead of assuming `PIPELINE`.
 - Every non-orchestrator agent ends its reply with `HARNESS-DONE`, after a
   report in the form `### Changes` / `### Evidence` / `### Notes for delivery`.
-  If the marker is missing, the harness sends one repair turn.
+  The harness verifies the marker after every step; if it is missing, it sends
+  one repair turn for that step and stops if it is still missing.
 - Reports are evidence-based: name the files changed, the checks actually run,
   and every check that could not be run.
-- The harness performs an advisory repository preflight before a pipeline. Warn
-  the user about uncommitted changes, branch divergence, or an open pull
-  request; do not claim the repository is clean when it is not.
+- The harness performs a repository preflight before a pipeline. Warn the user
+  about uncommitted changes, branch divergence, or an open pull request; do not
+  claim the repository is clean when it is not. With
+  `defaults.preflight_policy: blocking` a dirty tree or an open pull request
+  stops the first step whose agent is marked `mutates_files: true`.
 
 ## Memory — Engram
 

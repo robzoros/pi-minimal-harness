@@ -7,6 +7,13 @@ defaults:
   allow_dispatch: true
   subagent_context_file: AGENTS-addition.md
   allow_simple_mode: true
+  # A missing or ambiguous decision marker stops the pipeline instead of being
+  # read as "not ANSWER_ONLY", which would run the mutating steps of a task
+  # that may only need an answer. Set to false to keep guessing.
+  strict_decision_marker: true
+  # `advisory` only reports the repository state; `blocking` stops the first
+  # step that mutates files when the tree is dirty or a pull request is open.
+  preflight_policy: advisory
 
 commands:
   preferred_interface: slash
@@ -43,6 +50,7 @@ agents:
   orchestrator:
     model: provider/model-id
     reasoning: medium
+    mutates_files: false
     tools:
       - filesystem
       - engram
@@ -54,6 +62,7 @@ agents:
   explorer:
     model: provider/model-id
     reasoning: high
+    mutates_files: false
     tools:
       - filesystem
       - openspec
@@ -67,6 +76,7 @@ agents:
   critic:
     model: provider/model-id
     reasoning: medium
+    mutates_files: false
     tools:
       - filesystem
       - openspec
@@ -78,6 +88,7 @@ agents:
   implementer:
     model: provider/model-id
     reasoning: high
+    mutates_files: true
     tools:
       - filesystem
       - shell
@@ -91,6 +102,7 @@ agents:
   delivery:
     model: provider/model-id
     reasoning: low
+    mutates_files: true
     tools:
       - git
       - github

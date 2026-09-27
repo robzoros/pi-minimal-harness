@@ -23,7 +23,8 @@ prompt configured for that step.
 
 ## Decision marker (mandatory last line)
 
-End your reply with exactly one of these two lines, on its own line:
+End your reply with exactly one of these two lines, as the **last line with
+text** of the reply — nothing after it, not even a closing remark:
 
 - `HARNESS-DECISION: ANSWER_ONLY` — the task is a question, an explanation, a
   review, or anything that requires **no file changes**. Answer the task fully
@@ -33,7 +34,12 @@ End your reply with exactly one of these two lines, on its own line:
   the task itself; produce the classification, the recommendation and the
   handoff so the next step can execute.
 
-Never omit the marker. Never emit both.
+Never omit the marker. Never emit both. The harness reads only the last line
+with text: a marker quoted earlier (in prose, a code fence, or an example of
+the syntax) is not a decision and stays in the visible reply, and a final line
+naming both variants is ambiguous. With `defaults.strict_decision_marker`
+enabled, a reply without a usable marker stops the pipeline instead of running
+the remaining steps.
 
 The marker is never shown to the user: the harness records it and displays it
 in the status bar (`decision: …`), removing it from your reply. Keep emitting
