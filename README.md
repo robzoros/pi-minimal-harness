@@ -35,13 +35,14 @@ workflow you can actually audit.
 | Workflow modes | `simple`, `full-dry-run`, `full`, `implementation-only`, `delivery-only` — ordered agent steps from one YAML |
 | Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
 | Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
-| Report guarantee | The final agent must end with `HARNESS-DONE`; otherwise the harness sends exactly one repair turn |
+| Report guarantee | Every step that owes a report calls `harness_report` (fallback: ends with `HARNESS-DONE`); otherwise the harness sends one repair turn per step and stops if it is still missing |
+| Control tools | `harness_decision` and `harness_report` replace the textual markers as the primary signal; the markers stay as a one-release fallback |
 | Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
 | Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
-| Tests | `node tests/harness.test.mjs` (92 checks) and `node tests/install.test.mjs` (3 installer tests) |
+| Tests | `node tests/harness.test.mjs` (136 checks) and `node tests/install.test.mjs` (3 installer tests) |
 
 ## Install in your Pi project
 
@@ -161,12 +162,15 @@ defaults:
   question_short_circuit: true   # orchestrator's ANSWER_ONLY stops the pipeline
   allow_dispatch: true           # enable the harness-dispatch tool
   subagent_context_file: AGENTS-addition.md   # injected into dispatched subagents
+  strict_decision_marker: true   # stop when the orchestrator emits no decision
+  preflight_policy: advisory     # advisory | blocking (blocking gates file-mutating steps)
 workflows:
   full: { steps: [orchestrator, explorer, critic, implementer, delivery] }
 agents:
   orchestrator:
     model: provider/model-id     # exact id from /models
     reasoning: medium            # effort supported by the selected model; off for non-reasoning models
+    mutates_files: false         # may this step modify files? (gates preflight_policy)
     prompt_template: prompts/orchestrator.md
 skills:
   project_directory: .agents/skills
@@ -186,12 +190,34 @@ Validate any time with `/harness-config` → *Validate configuration* (checks
 modes, agents, catalog model IDs, model-supported reasoning efforts, templates,
 workflow steps, the contract file and the delivery skill).
 
-Before starting a pipeline, the harness performs an advisory repository
-preflight. It warns about uncommitted changes, an upstream branch that is ahead
-or behind, and an open pull request when GitHub CLI is available. The warning
-does not block the task; resolve or synchronize the repository when the warning
-applies. `/harness-delivery` is intended for delivering the current verified
-changes without changing `defaults.workflow_mode`.
+## Control tools
+
+The harness asks its agents two questions — *does this task need file changes?*
+and *did this step finish its report?* — through tools instead of conventions
+in free text, so the answer is recorded by the call itself rather than parsed
+out of a reply:
+
+| Tool | Called by | Arguments |
+|---|---|---|
+| `harness_decision` | the orchestrator step, once at the end of the turn | `decision` (`ANSWER_ONLY` or `PIPELINE`, case-insensitive), `reason` |
+| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes` |
+
+Both are inert outside a running pipeline, and an unusable argument makes the
+call fail instead of being silently ignored. When a tool call and a textual
+marker disagree, the tool wins. The markers (`HARNESS-DECISION`,
+`HARNESS-DONE`) remain supported as a fallback for one release.
+
+Before starting a pipeline, the harness performs a repository preflight. It
+warns about uncommitted changes, an upstream branch that is ahead or behind,
+and an open pull request when GitHub CLI is available. Set
+`defaults.preflight_policy: blocking` to make the risky states *stop* the first
+step marked `mutates_files: true` (uncommitted changes and an open pull
+request; branch divergence stays a warning, because pulling is your call). In
+`blocking` mode the operator is asked once — and without a TUI the step is
+blocked and reported as an error rather than continuing silently. Unmarked
+agents are assumed to mutate files; `/harness-config` validation lists them.
+`/harness-delivery` is intended for delivering the current verified changes
+without changing `defaults.workflow_mode`.
 
 ## Commands and markers
 
@@ -203,8 +229,8 @@ changes without changing `defaults.workflow_mode`.
 | `/harness-run <task>` | Force the pipeline for one task |
 | `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
-| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision  |
-| `HARNESS-DONE` | Mandatory last line of every non-orchestrator agent reply |
+| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply — fallback for when `harness_decision` is unavailable |
+| `HARNESS-DONE` | Fallback completion marker for every non-orchestrator agent reply |
 
 ## Skills
 

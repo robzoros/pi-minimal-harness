@@ -29,20 +29,37 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   renders `prompts/<agent>.md` as a short pointer (template bodies never enter
   the transcript) and sends it as the next turn; the runtime sequences the
   steps, so the model cannot skip them.
-- The orchestrator emits `HARNESS-DECISION: ANSWER_ONLY` for questions and tasks
-  that change no files; the pipeline then stops after the first step. It emits
-  `HARNESS-DECISION: PIPELINE` when files must change.
+- The orchestrator declares its decision with the `harness_decision` tool, once
+  at the end of its turn: `ANSWER_ONLY` for questions and tasks that change no
+  files (the pipeline stops after the first step) or `PIPELINE` when files must
+  change. The textual marker `HARNESS-DECISION:` on the last line remains a
+  fallback; the tool wins when both are present. The marker counts only on the
+  last non-empty line, and both variants on that line are ambiguous.
+  `defaults.strict_decision_marker` makes a turn with no usable decision stop
+  the pipeline instead of reading its absence as `PIPELINE`.
 - `defaults.auto_harness` sends plain (non-slash) requests through the pipeline;
   `defaults.question_short_circuit` enables the orchestrator's early exit.
-- After the last step, the driver checks the reply for `HARNESS-DONE`; if it is
-  missing it sends exactly one repair turn and then warns. A direct answer
-  (`ANSWER_ONLY`) needs no report.
+- The driver checks every step's report: a `harness_report` call satisfies it, and
+  the textual marker `HARNESS-DONE` is the fallback. If neither is present the
+  driver sends exactly one repair turn for that step, naming it, and stops the
+  pipeline if the report is still missing. A direct answer (`ANSWER_ONLY`) needs
+  no report and is never repaired.
 - The orchestrator's `HARNESS-DECISION` marker is stripped from the reply and
   shown in the footer instead (`decision: …`). For questions the footer ends at
   `1/1 <agent>`; during step 1 the total is shown only once the decision is known.
 - The `harness-dispatch` tool runs independent tasks in isolated `pi`
   subprocesses with a curated brief; gated by `defaults.allow_dispatch` and the
   `defaults.subagent_context_file` contract (see `docs/DISPATCH-PLAN.md`).
+- The control tools `harness_decision` and `harness_report` record the pipeline's
+  control flow. Their state is captured in their own `execute`, which runs after
+  the `message_end` hook — so the tool must assign unconditionally and the hook
+  only when empty, or the textual fallback would win. They are inert outside a
+  pipeline.
+- The repository preflight reads `defaults.preflight_policy`: `advisory` only
+  reports, `blocking` stops the first agent marked `mutates_files: true` when
+  the tree is dirty or a pull request is open — asked once with a TUI, blocked
+  with an error without one. Agents without the field are assumed to mutate
+  files, so validation lists them.
 - Memory is provided by the user-level `gentle-engram` Pi package together with
   `pi-mcp-adapter` (`~/.pi/agent/mcp.json` → `engram mcp --tools=agent`): it owns
   session registration, passive capture, the `mem_*` tools, the injected Memory
@@ -70,9 +87,10 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
 - The extension is validated by the in-repo smoke test `tests/harness.test.mjs`,
   which imports `.pi/extensions/harness.ts`, drives the registered
   commands/events/tool with fakes and asserts the pipeline, status text,
-  short-circuit, report guarantee, decision handling, validation and the
+  short-circuit, per-step report guarantee, decision handling (including the
+  strict decision marker and the blocking preflight), validation and the
   dispatch seams. Run it after every extension change (`node tests/harness.test.mjs`)
-  and report pass/fail counts.
+  and report pass/fail counts. `node tests/install.test.mjs` covers the installer.
 - Inspect the changed regions (git exists: confirm with `git status`/reads and
   by confirming no unintended file changed).
 - TUI end-to-end requires `/reload` in an interactive Pi session; report it as

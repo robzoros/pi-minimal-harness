@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Control tools `harness_decision` and `harness_report`: the pipeline's
+  decision and per-step report are now recorded by a tool call instead of being
+  parsed out of the reply. The `HARNESS-DECISION` and `HARNESS-DONE` markers stay
+  supported as a fallback for one release, and the tool wins when both are
+  present. `harness_report` also captures the changed files and the checks that
+  were run, which later steps can verify instead of trusting.
+- `defaults.strict_decision_marker` (default `false`; enabled in this
+  repository's own config): a multi-step pipeline stops with an error when the
+  orchestrator's reply carries no usable decision marker, instead of reading
+  its absence as "not `ANSWER_ONLY`" and running the file-mutating steps.
+- `defaults.preflight_policy` (`advisory` | `blocking`): under `blocking`, a
+  dirty working tree or an open pull request stops the first step that mutates
+  files. With a TUI the operator is asked once; without one the step is blocked
+  and reported as an error — never silently continued.
+- `agents.<name>.mutates_files` marks which steps may modify files, so the
+  preflight gate can protect them without naming agents in the extension.
+  Agents without the field are assumed to mutate files, and `/harness-config`
+  validation lists them.
 - A dependency-free `pi-minimal-harness init` installer with dry-run, force,
   idempotent contract merging, and local Git exclusion for the generated config.
 - Model-aware reasoning-effort selection in `/harness-model`: after choosing a
@@ -17,6 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A turn whose assistant message still carries a pending tool call no longer
+  satisfies the auto-harness turn wait, so a step that uses a tool is no longer
+  read as finished between the tool call and its follow-up.
+- The `HARNESS-DECISION` marker is only read on the **last non-empty line** of
+  the orchestrator's reply. A marker quoted earlier (in prose, a code fence or
+  a list of examples) no longer decides the pipeline and is no longer stripped
+  from the visible reply; a final line naming both variants is ambiguous and
+  yields no decision.
+- `HARNESS-DONE` is now verified after **every** step instead of only the last
+  one, with one repair turn per step naming the step, and the pipeline stops
+  when a step still omits its report. A direct `ANSWER_ONLY` answer owes no
+  report and is never repaired.
 - Configuration validation now checks configured model IDs and model-supported
   reasoning efforts when Pi's catalog is available.
 - Pipeline and background dispatch reject or warn about unsupported

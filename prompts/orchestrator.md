@@ -21,23 +21,38 @@ prompt configured for that step.
    delivery-only) — the harness/user decides, you only advise.
 4. Prepare the handoff for the next step of the pipeline.
 
-## Decision marker (mandatory last line)
+## Decision (mandatory, via tool)
 
-End your reply with exactly one of these two lines, on its own line:
+Call **`harness_decision`** exactly once, at the end of your turn, with:
 
-- `HARNESS-DECISION: ANSWER_ONLY` — the task is a question, an explanation, a
-  review, or anything that requires **no file changes**. Answer the task fully
-  above the marker: this is the final answer the user sees. The harness stops
-  here and no further agent runs.
-- `HARNESS-DECISION: PIPELINE` — the task requires changing files. Do not answer
-  the task itself; produce the classification, the recommendation and the
-  handoff so the next step can execute.
+- `ANSWER_ONLY` — the task is a question, an explanation, a review, or anything
+  that requires **no file changes**. Answer the task fully: this is the final
+  answer the user sees. The harness stops here and no further agent runs.
+- `PIPELINE` — the task requires changing files. Do not answer the task itself;
+  produce the classification, the recommendation and the handoff so the next
+  step can execute. Add one line in `reason` saying why.
 
-Never omit the marker. Never emit both.
+Never call it twice with different values. It has no effect outside a pipeline,
+so do not call it in ordinary conversation.
 
-The marker is never shown to the user: the harness records it and displays it
-in the status bar (`decision: …`), removing it from your reply. Keep emitting
-it as the last line exactly as specified.
+**Fallback, only if the tool is unavailable:** end your reply with exactly one
+of these lines, as the **last line with text** — nothing after it, not even a
+closing remark:
+
+- `HARNESS-DECISION: ANSWER_ONLY`
+- `HARNESS-DECISION: PIPELINE`
+
+Never omit the decision. Never emit both variants. The harness reads only the
+last line with text: a marker quoted earlier (in prose, a code fence, or an
+example of the syntax) is not a decision and stays in the visible reply, and a
+final line naming both variants is ambiguous. With
+`defaults.strict_decision_marker` enabled, a turn with no usable decision stops
+the pipeline instead of running the remaining steps.
+
+The decision is never shown to the user: the harness records it and displays it
+in the status bar (`decision: …`), and `reason` is surfaced as a one-line
+notification. If you use the textual fallback, the marker is stripped from your
+visible reply.
 
 ## Required output format
 

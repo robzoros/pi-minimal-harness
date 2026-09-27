@@ -32,6 +32,8 @@ cfgText = cfgText
   .replace(/^ {2}auto_harness: .*$/m, "  auto_harness: true")
   .replace(/^ {2}question_short_circuit: .*$/m, "  question_short_circuit: true")
   .replace(/^ {2}allow_dispatch: .*$/m, "  allow_dispatch: true")
+  .replace(/^ {2}strict_decision_marker: .*$/m, "  strict_decision_marker: true")
+  .replace(/^ {2}preflight_policy: .*$/m, "  preflight_policy: advisory")
   // Keep the smoke test independent of the operator's live model choices.
   .replace(/^ {4}model: .*$/gm, "    model: opencode-go/gpt-5.1")
   .replace(/(^ {2}orchestrator:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1medium")
@@ -55,15 +57,22 @@ const statuses = [];
 const widgets = [];
 const branchArr = [];
 const assistantScript = [];
+const toolErrors = [];
+/** Tool call to emit on the next assistant turn: { name, params, text }. */
+let pendingToolCall = null;
 let assistantTextOverride = null;
 let turnN = 0;
+let assistantTurns = 0;
 let idle = true;
 let activeCtx = null;
 
-const nextAssistantText = () => {
+const nextAssistantText = (turn = 0) => {
   if (assistantScript.length > 0) return assistantScript.shift();
   if (assistantTextOverride) return assistantTextOverride;
   turnN++;
+  // The first assistant turn is the orchestrator: it must declare a decision on
+  // its last line or the pipeline fails closed.
+  if (turn === 1) return `output-of-turn-1\n\nHARNESS-DECISION: PIPELINE`;
   return `output-of-turn-${turnN}\n\nHARNESS-DONE`;
 };
 
@@ -93,10 +102,48 @@ const fakePi = {
     branchArr.push({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
     idle = false;
     setTimeout(async () => {
+      assistantTurns++;
+      const call = pendingToolCall;
+      pendingToolCall = null;
+      if (call) {
+        // A tool turn, as the runtime really produces it: the assistant
+        // message carrying the tool call is emitted first (message_end runs
+        // before the tool executes), then the tool runs, then the follow-up
+        // text message arrives.
+        const callId = `call-${assistantTurns}`;
+        const toolMessage = {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            ...(call.text ? [{ type: "text", text: call.text }] : []),
+            { type: "toolCall", id: callId, name: call.name, arguments: call.params },
+          ],
+        };
+        const toolHandler = events["message_end"];
+        if (toolHandler) {
+          try {
+            const result = await toolHandler({ type: "message_end", message: toolMessage }, activeCtx);
+            if (result && result.message) Object.assign(toolMessage, result.message);
+          } catch {
+            // keep the original message if the handler fails
+          }
+        }
+        branchArr.push({ type: "message", message: toolMessage });
+        await new Promise((r) => setTimeout(r, 20));
+        const tool = tools[call.name];
+        if (tool) {
+          try {
+            await tool.execute(callId, call.params, undefined, undefined, activeCtx);
+          } catch (error) {
+            toolErrors.push(String(error));
+          }
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
       let message = {
         role: "assistant",
         stopReason: "end",
-        content: [{ type: "text", text: nextAssistantText() }],
+        content: [{ type: "text", text: nextAssistantText(assistantTurns) }],
       };
       const handler = events["message_end"];
       if (handler) {
@@ -155,6 +202,9 @@ const reset = () => {
   thinkingCalls.length = 0;
   assistantScript.length = 0;
   assistantTextOverride = null;
+  assistantTurns = 0;
+  pendingToolCall = null;
+  toolErrors.length = 0;
 };
 
 // --- registration ------------------------------------------------------------
@@ -226,6 +276,56 @@ check("parseHarnessDecision ANSWER_ONLY", mod.parseHarnessDecision("Direct.\n\nH
 check("parseHarnessDecision PIPELINE", mod.parseHarnessDecision("HARNESS-DECISION: PIPELINE") === "pipeline");
 check("parseHarnessDecision no marker -> null", mod.parseHarnessDecision("just text") === null);
 check(
+  "parseHarnessDecision ignores a marker quoted mid-reply",
+  mod.parseHarnessDecision("If it said HARNESS-DECISION: ANSWER_ONLY I would stop.\n\nBack to work.") === null,
+);
+check(
+  "parseHarnessDecision ignores a marker inside a code fence",
+  mod.parseHarnessDecision("Example:\n\n```\nHARNESS-DECISION: PIPELINE\n```\n\nThat is the syntax.") === null,
+);
+check(
+  "parseHarnessDecision rejects both variants on the last line",
+  mod.parseHarnessDecision("HARNESS-DECISION: PIPELINE HARNESS-DECISION: ANSWER_ONLY") === null,
+);
+check(
+  "splitDecisionLine keeps a quoted marker visible and strips only the final one",
+  mod.splitDecisionLine("Use HARNESS-DECISION: PIPELINE like this:\n\nHARNESS-DECISION: PIPELINE").rest ===
+    "Use HARNESS-DECISION: PIPELINE like this:",
+);
+check(
+  "splitDecisionLine keeps prose sharing the marker's line",
+  mod.splitDecisionLine("Plan ready. HARNESS-DECISION: PIPELINE").rest === "Plan ready.",
+);
+check("splitDecisionLine hadMarker true for an ambiguous line", mod.splitDecisionLine("HARNESS-DECISION: PIPELINE HARNESS-DECISION: ANSWER_ONLY").hadMarker === true);
+
+// --- P0-2 / P0-4: config flags ------------------------------------------------
+const strictLines = lines.map((l) => l.replace(/^ {2}strict_decision_marker:.*$/, "  strict_decision_marker: true"));
+check("isStrictDecisionMarker reads the flag", mod.isStrictDecisionMarker(strictLines) === true);
+check("isStrictDecisionMarker defaults to false", mod.isStrictDecisionMarker(lines.map((l) => l.replace(/^ {2}strict_decision_marker:.*$/, ""))) === false);
+check(
+  "preflightPolicy reads blocking and falls back to advisory",
+  mod.preflightPolicy(strictLines.map((l) => l.replace(/^ {2}preflight_policy:.*$/, "  preflight_policy: blocking"))) === "blocking" &&
+    mod.preflightPolicy(strictLines.map((l) => l.replace(/^ {2}preflight_policy:.*$/, "  preflight_policy: nonsense"))) === "advisory",
+);
+check(
+  "agentMutatesFiles reads the per-agent flag and defaults to true",
+  mod.agentMutatesFiles(lines, "implementer") === true &&
+    mod.agentMutatesFiles(lines, "orchestrator") === false &&
+    mod.agentMutatesFiles(lines, "unknown-agent") === true,
+);
+check(
+  "formatBlockingPreflight blocks a dirty tree and an open PR only",
+  mod.formatBlockingPreflight(repositoryState).length === 2 &&
+    mod.formatBlockingPreflight({ ...repositoryState, dirty: false }).length === 1 &&
+    mod.formatBlockingPreflight({ ...repositoryState, dirty: false, pullRequest: null }).length === 0 &&
+    mod.formatBlockingPreflight({ ...repositoryState, dirty: false, ahead: 0, behind: 4, pullRequest: null }).length === 0,
+  JSON.stringify(mod.formatBlockingPreflight(repositoryState)),
+);
+check(
+  "formatBlockingPreflight is empty without git",
+  mod.formatBlockingPreflight({ available: false, dirty: false, branch: null, upstream: null, ahead: 0, behind: 0, pullRequest: null }).length === 0,
+);
+check(
   "renderPrompt placeholders",
   mod.renderPrompt("Task: {{task}} mode={{mode}} agent={{agent}} step={{step}}/{{steps}} prev={{previous}}", {
     task: "X", mode: "full", agent: "a", step: "1", steps: "5", previous: "p",
@@ -236,7 +336,23 @@ check("renderPrompt appends missing {{task}}", mod.renderPrompt("No task here", 
 // --- validation --------------------------------------------------------------
 const checks = await mod.validate(lines, cfgPath, tmp);
 const failed = checks.filter((c) => !c.ok);
-check("validate: 0 failures", failed.length === 0, failed.map((f) => `${f.label} [${f.detail ?? ""}]`).join("; "));
+check(
+  "validate: 0 failures",
+  failed.length === 0,
+  failed.map((f) => `${f.label} [${f.detail ?? ""}]`).join("; "),
+);
+check(
+  "validate: flags the agents that do not declare mutates_files",
+  (await mod.validate(lines.map((l) => l.replace(/^ {4}mutates_files:.*$/, "")), cfgPath, tmp)).some(
+    (c) => c.label.includes('"implementer" declares mutates_files') && !c.ok,
+  ),
+);
+check(
+  "validate: rejects an unknown preflight_policy",
+  (await mod.validate(lines.map((l) => l.replace(/^ {2}preflight_policy:.*$/, "  preflight_policy: whatever")), cfgPath, tmp)).some(
+    (c) => c.label.includes("preflight_policy is advisory or blocking") && !c.ok,
+  ),
+);
 check(
   "validate includes workflow + template checks",
   checks.some((c) => c.label.includes('workflows has an entry for mode "simple"')) &&
@@ -439,10 +555,10 @@ check("pipeline: thinking restored to original", thinkingCalls.at(-1) === "high"
 check(
   "pipeline: step1 shows no invented total, step2 shows 2/2",
   statuses.includes("harness: simple · orchestrator · auto: on") &&
-    statuses.includes("harness: simple · 2/2 implementer · auto: on"),
+    statuses.includes("harness: simple · 2/2 implementer · decision: pipeline · auto: on"),
   statuses.join(" | "),
 );
-check("pipeline: footer ends at mode + auto", statuses.at(-1) === "harness: simple · auto: on", String(statuses.at(-1)));
+check("pipeline: footer ends at mode + decision + auto", statuses.at(-1) === "harness: simple · decision: pipeline · auto: on", String(statuses.at(-1)));
 check("pipeline: finished info (report present, no repair)", notifies.some((n) => n.includes('Pipeline "simple" finished: orchestrator -> implementer')), notifies.join(" | "));
 
 reset();
@@ -501,7 +617,7 @@ check(
 );
 
 reset();
-assistantTextOverride = "Plan.\n\nHARNESS-DECISION: PIPELINE\n\nHARNESS-DONE";
+assistantTextOverride = "Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "implementa la feature", waitTurn);
 check("short-circuit: PIPELINE runs all steps", sent.length === 2, `got ${sent.length}`);
 check(
@@ -514,7 +630,7 @@ check(
 const cfgTextShort = await fs.readFile(cfgPath, "utf8");
 await fs.writeFile(cfgPath, cfgTextShort.replace("  question_short_circuit: true", "  question_short_circuit: false"));
 reset();
-assistantTextOverride = "Direct answer.\n\nHARNESS-DECISION: ANSWER_ONLY\n\nHARNESS-DONE";
+assistantTextOverride = "Direct answer.\n\nHARNESS-DONE\n\nHARNESS-DECISION: ANSWER_ONLY";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "¿otra pregunta?", waitTurn);
 check("short-circuit: disabled flag runs all steps", sent.length === 2, `got ${sent.length}`);
 await fs.writeFile(cfgPath, cfgTextShort);
@@ -544,7 +660,7 @@ check("report: finished as info", notifies.some((n) => n.startsWith("[info]") &&
 
 // Case 2: final step omits it -> exactly one repair turn, then compliance.
 reset();
-assistantScript.push("orchestrator output");
+assistantScript.push("orchestrator output\n\nHARNESS-DECISION: PIPELINE");
 assistantScript.push("implementer output sin marca");
 assistantScript.push("### Changes\n- none\n\n### Evidence\n- test\n\n### Notes for delivery\n- none\n\nHARNESS-DONE");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "task two", waitTurn);
@@ -558,12 +674,17 @@ check(
 
 // Case 3: repair also omits it -> warning, still only one repair turn.
 reset();
-assistantScript.push("orchestrator output");
+assistantScript.push("orchestrator output\n\nHARNESS-DECISION: PIPELINE");
 assistantScript.push("implementer sin marca");
 assistantScript.push("reparación sin marca");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "task three", waitTurn);
-check("report: repair fails -> warning", notifies.some((n) => n.startsWith("[warning]") && n.includes("final report is missing")), notifies.join(" | "));
+check("report: repair fails -> warning", notifies.some((n) => n.startsWith("[warning]") && n.includes("report is missing")), notifies.join(" | "));
 check("report: still only one repair turn", sent.length === 3, `got ${sent.length}`);
+check(
+  "report: repair failure names the step and stops the pipeline",
+  notifies.some((n) => n.includes("did not report") && n.includes("implementer")),
+  notifies.join(" | "),
+);
 
 // Decision segment clears again on session_start.
 statuses.length = 0;
@@ -670,6 +791,9 @@ sent.length = 0;
 setModelCalls.length = 0;
 assistantScript.length = 0;
 assistantTextOverride = null;
+// The detached pipeline starts a fresh turn count: its first reply is the
+// orchestrator and must declare a decision.
+assistantTurns = 0;
 
 const passthrough = await events["input"]({ text: "/harness-mode full", source: "interactive" }, makeCtx(tmp, false));
 check("input: slash command passes through", passthrough.action === "continue");
@@ -689,6 +813,206 @@ await fs.writeFile(cfgPath, mod.setAutoHarness((await fs.readFile(cfgPath, "utf8
 sent.length = 0;
 const off = await events["input"]({ text: "just chat", source: "interactive" }, makeCtx(tmp, false));
 check("input: auto off passes through", off.action === "continue" && sent.length === 0);
+
+// --- P0-2 / P0-3 / P0-4: driver behaviour -------------------------------------
+const forceFlags = (text, flags) =>
+  Object.entries(flags).reduce((acc, [key, value]) => acc.replace(new RegExp(`^ {2}${key}: .*$`, "m"), `  ${key}: ${value}`), text);
+const baseCfg = await fs.readFile(cfgPath, "utf8");
+
+// P0-2: with the strict default, a reply without a usable marker stops the
+// pipeline instead of being read as "PIPELINE".
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory" }));
+reset();
+assistantTextOverride = "A plan that forgot its decision marker.";
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
+check("strict: missing decision marker stops the pipeline", sent.length === 1, `got ${sent.length}`);
+check(
+  "strict: missing marker is reported as an error",
+  notifies.some((n) => n.startsWith("[error]") && n.includes("declared no decision")),
+  notifies.join(" | "),
+);
+
+reset();
+assistantTextOverride = "Both at once: HARNESS-DECISION: PIPELINE HARNESS-DECISION: ANSWER_ONLY";
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
+check("strict: ambiguous decision stops the pipeline", sent.length === 1, `got ${sent.length}`);
+
+reset();
+assistantTextOverride = 'If it had written "HARNESS-DECISION: ANSWER_ONLY" I would stop, but it did not.';
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
+check("strict: a quoted marker does not decide", sent.length === 1, `got ${sent.length}`);
+
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: false }));
+reset();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
+check("strict: disabled keeps the previous fail-open behaviour", sent.length === 2, `got ${sent.length}`);
+
+// P0-3: an intermediate step owes its report too.
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory" }));
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+assistantScript.push("explorer sin informe");
+assistantScript.push("el explorador sigue sin informe");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea", waitTurn, "full-dry-run");
+check("report: an intermediate step is verified", sent.length === 3, `got ${sent.length}`);
+check("report: the repair prompt names the step", sent[2]?.includes('"explorer"'), String(sent[2]).slice(0, 90));
+check(
+  "report: the pipeline stops when a step still omits the marker",
+  notifies.some((n) => n.includes("did not report") && n.includes("explorer")),
+  notifies.join(" | "),
+);
+check(
+  "report: later steps never run after an unverified step",
+  !sent.some((s) => s.includes("critic")),
+  sent.map((s) => s.slice(0, 40)).join(" | "),
+);
+
+// P0-4: a real repository, with a dirty tree, in front of the file-mutating step.
+const { execFileSync } = await import("node:child_process");
+const gateRepo = path.join(tmp, "gate-repo");
+let gateReady = false;
+try {
+  execFileSync("git", ["init", "-q", gateRepo], { stdio: "ignore" });
+  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "blocking" }));
+  await fs.cp(path.join(ROOT, "prompts"), path.join(gateRepo, "prompts"), { recursive: true });
+  await fs.writeFile(path.join(gateRepo, "uncommitted.txt"), "work in progress\n");
+  gateReady = true;
+} catch {
+  gateReady = false;
+}
+
+if (gateReady) {
+  reset();
+  assistantTextOverride = "Plan.\n\nHARNESS-DECISION: PIPELINE";
+  const noUiGate = makeCtx(gateRepo, true);
+  noUiGate.hasUI = false;
+  await mod.runPipeline(fakePi, noUiGate, "tarea", waitTurn);
+  check("preflight: blocking stops the file-mutating step", sent.length === 1, `got ${sent.length}`);
+  check(
+    "preflight: without a TUI the block is an error, never a silent pass",
+    notifies.some((n) => n.startsWith("[error]") && n.includes('Pipeline blocked before "implementer"')),
+    notifies.join(" | "),
+  );
+
+  reset();
+  const allowGate = makeCtx(gateRepo, true);
+  let confirms = 0;
+  allowGate.ui.confirm = async () => {
+    confirms++;
+    return true;
+  };
+  await mod.runPipeline(fakePi, allowGate, "tarea", waitTurn, "full");
+  check(
+    "preflight: the operator override runs the mutating steps, asking once",
+    confirms === 1 && sent.length === 5,
+    `confirms=${confirms} prompts=${sent.length}`,
+  );
+
+  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "advisory" }));
+  reset();
+  const advisoryGate = makeCtx(gateRepo, true);
+  advisoryGate.ui.confirm = async () => {
+    confirms++;
+    return false;
+  };
+  await mod.runPipeline(fakePi, advisoryGate, "tarea", waitTurn);
+  check(
+    "preflight: advisory only warns and never asks",
+    sent.length === 2 && confirms === 1 && notifies.some((n) => n.includes("uncommitted changes")),
+    `prompts=${sent.length} confirms=${confirms} ${notifies.join(" | ")}`,
+  );
+} else {
+  console.log("SKIP preflight gate tests: git is unavailable in this environment");
+}
+
+// --- P1-5: structured control tools -------------------------------------------
+check("control tools are registered", !!tools["harness_decision"] && !!tools["harness_report"]);
+check(
+  "normalizeDecision accepts sloppy casing and rejects nonsense",
+  mod.normalizeDecision("PIPELINE") === "pipeline" &&
+    mod.normalizeDecision(" answer_only ") === "answer_only" &&
+    mod.normalizeDecision("nope") === null &&
+    mod.normalizeDecision(7) === null,
+);
+check("lastAssistantHasToolCall reads the newest assistant message", mod.lastAssistantHasToolCall(makeCtx(tmp, true)) === false);
+
+const noPipelineCtx = makeCtx(tmp, true);
+const inertDecision = await tools["harness_decision"].execute("c0", { decision: "PIPELINE" }, undefined, undefined, noPipelineCtx);
+const inertReport = await tools["harness_report"].execute("c1", { changed_files: ["a.ts"] }, undefined, undefined, noPipelineCtx);
+check(
+  "control tools are inert outside a pipeline",
+  inertDecision.content[0].text.includes("No harness pipeline") && inertReport.content[0].text.includes("No harness pipeline"),
+  `${inertDecision.content[0].text} / ${inertReport.content[0].text}`,
+);
+
+const badDecision = await tools["harness_decision"]
+  .execute("c2", { decision: "maybe" }, undefined, undefined, makeCtx(tmp, true))
+  .then(() => "resolved", (error) => error);
+check(
+  "harness_decision throws on an unusable value (the runtime only marks throws as errors)",
+  badDecision instanceof Error && badDecision.message.includes("ANSWER_ONLY"),
+  String(badDecision),
+);
+
+// Tool decision on a multi-step pipeline: runs, no short-circuit, no repair.
+const cfgControl = await fs.readFile(cfgPath, "utf8");
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "pipeline", reason: "files must change" } };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "cambiar algo", waitTurn);
+check("tool: a decision call runs the whole pipeline", sent.length === 2, `got ${sent.length}`);
+check("tool: no repair turn when the decision came from the tool", !sent.some((s) => s.includes("no usable decision")), sent.length + "");
+check(
+  "tool: the reason is surfaced for the operator",
+  notifies.some((n) => n.includes("Orchestrator decision: pipeline") && n.includes("files must change")),
+  notifies.join(" | "),
+);
+check("tool: sloppy casing is accepted", toolErrors.length === 0, toolErrors.join(" | "));
+
+// ANSWER_ONLY through the tool short-circuits exactly like the marker.
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" } };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "una pregunta", waitTurn);
+check("tool: ANSWER_ONLY short-circuits after step 1", sent.length === 1, `got ${sent.length}`);
+check(
+  "tool: short-circuit footer shows 1/1 with the decision",
+  statuses.at(-1)?.includes("1/1 orchestrator") && statuses.at(-1)?.includes("decision: answer_only"),
+  String(statuses.at(-1)),
+);
+
+// The tool wins over a contradicting marker, thanks to the runtime ordering:
+// message_end (which reads the marker) runs BEFORE the tool executes.
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" }, text: "Done.\n\nHARNESS-DECISION: PIPELINE" };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "contradicción", waitTurn);
+check("tool: the tool beats a contradicting marker in the same message", sent.length === 1, `got ${sent.length}`);
+
+// Lowercase decision must not stop the pipeline (the enum trap the critic flagged).
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" }, text: "Done.\n\nHARNESS-DECISION: PIPELINE" };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "contradicción invertida", waitTurn);
+check("tool: lowercase decision is normalized, not rejected", sent.length === 1 && toolErrors.length === 0, `sent=${sent.length} ${toolErrors.join("|")}`);
+
+// A report call satisfies the per-step guarantee with no HARNESS-DONE at all.
+reset();
+pendingToolCall = null;
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea con report tool", waitTurn, "full-dry-run");
+check("report tool: the text marker still works as a fallback", sent.length === 3, `got ${sent.length}`);
+
+// harness_report replaces HARNESS-DONE for the last step.
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+pendingToolCall = {
+  name: "harness_report",
+  params: { changed_files: ["a.ts", "b.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "listo" },
+};
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea con report", waitTurn);
+check("report tool: a harness_report call satisfies the step with no marker", sent.length === 2, `got ${sent.length}`);
+check(
+  "report tool: no repair turn and no missing-report warning",
+  !notifies.some((n) => n.includes("did not report")) && !notifies.some((n) => n.includes("report is missing")),
+  notifies.join(" | "),
+);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
