@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Control tools `harness_decision` and `harness_report`: the pipeline's
+  decision and per-step report are now recorded by a tool call instead of being
+  parsed out of the reply. The `HARNESS-DECISION` and `HARNESS-DONE` markers stay
+  supported as a fallback for one release, and the tool wins when both are
+  present. `harness_report` also captures the changed files and the checks that
+  were run, which later steps can verify instead of trusting.
 - `defaults.strict_decision_marker` (default `false`; enabled in this
   repository's own config): a multi-step pipeline stops with an error when the
   orchestrator's reply carries no usable decision marker, instead of reading
@@ -29,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A turn whose assistant message still carries a pending tool call no longer
+  satisfies the auto-harness turn wait, so a step that uses a tool is no longer
+  read as finished between the tool call and its follow-up.
 - The `HARNESS-DECISION` marker is only read on the **last non-empty line** of
   the orchestrator's reply. A marker quoted earlier (in prose, a code fence or
   a list of examples) no longer decides the pipeline and is no longer stripped

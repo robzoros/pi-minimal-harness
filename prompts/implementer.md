@@ -37,4 +37,10 @@ When you are invoked as a background subagent, your context is this brief plus
 the injected project rules — there is no prior conversation; read files to
 expand what you need.
 
-Mandatory **last line of your reply: `HARNESS-DONE`** (after your report).
+Write the report above, then call **`harness_report`** exactly once with
+`changed_files` (the repository-relative paths you actually changed),
+`checks` (the checks you actually ran, with `passed` / `failed` / `skipped`,
+including every check you could not run) and `notes` (what delivery must know).
+
+**Fallback, only if the tool is unavailable:** end your reply with
+`HARNESS-DONE` as the last line.

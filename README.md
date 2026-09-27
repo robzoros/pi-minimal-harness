@@ -35,14 +35,14 @@ workflow you can actually audit.
 | Workflow modes | `simple`, `full-dry-run`, `full`, `implementation-only`, `delivery-only` — ordered agent steps from one YAML |
 | Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
 | Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
-| Report guarantee | Every step that owes a report must end with `HARNESS-DONE`; otherwise the harness sends one repair turn per step and stops if it is still missing |
-| Decision guard | `strict_decision_marker` stops a multi-step pipeline whose orchestrator emitted no usable `HARNESS-DECISION` instead of guessing |
+| Report guarantee | Every step that owes a report calls `harness_report` (fallback: ends with `HARNESS-DONE`); otherwise the harness sends one repair turn per step and stops if it is still missing |
+| Control tools | `harness_decision` and `harness_report` replace the textual markers as the primary signal; the markers stay as a one-release fallback |
 | Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
 | Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
-| Tests | `node tests/harness.test.mjs` (120 checks) and `node tests/install.test.mjs` (3 installer tests) |
+| Tests | `node tests/harness.test.mjs` (136 checks) and `node tests/install.test.mjs` (3 installer tests) |
 
 ## Install in your Pi project
 
@@ -190,6 +190,23 @@ Validate any time with `/harness-config` → *Validate configuration* (checks
 modes, agents, catalog model IDs, model-supported reasoning efforts, templates,
 workflow steps, the contract file and the delivery skill).
 
+## Control tools
+
+The harness asks its agents two questions — *does this task need file changes?*
+and *did this step finish its report?* — through tools instead of conventions
+in free text, so the answer is recorded by the call itself rather than parsed
+out of a reply:
+
+| Tool | Called by | Arguments |
+|---|---|---|
+| `harness_decision` | the orchestrator step, once at the end of the turn | `decision` (`ANSWER_ONLY` or `PIPELINE`, case-insensitive), `reason` |
+| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes` |
+
+Both are inert outside a running pipeline, and an unusable argument makes the
+call fail instead of being silently ignored. When a tool call and a textual
+marker disagree, the tool wins. The markers (`HARNESS-DECISION`,
+`HARNESS-DONE`) remain supported as a fallback for one release.
+
 Before starting a pipeline, the harness performs a repository preflight. It
 warns about uncommitted changes, an upstream branch that is ahead or behind,
 and an open pull request when GitHub CLI is available. Set
@@ -212,8 +229,8 @@ without changing `defaults.workflow_mode`.
 | `/harness-run <task>` | Force the pipeline for one task |
 | `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
-| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply |
-| `HARNESS-DONE` | Mandatory last line of every non-orchestrator agent reply |
+| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply — fallback for when `harness_decision` is unavailable |
+| `HARNESS-DONE` | Fallback completion marker for every non-orchestrator agent reply |
 
 ## Skills
 

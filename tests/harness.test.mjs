@@ -57,6 +57,9 @@ const statuses = [];
 const widgets = [];
 const branchArr = [];
 const assistantScript = [];
+const toolErrors = [];
+/** Tool call to emit on the next assistant turn: { name, params, text }. */
+let pendingToolCall = null;
 let assistantTextOverride = null;
 let turnN = 0;
 let assistantTurns = 0;
@@ -100,6 +103,43 @@ const fakePi = {
     idle = false;
     setTimeout(async () => {
       assistantTurns++;
+      const call = pendingToolCall;
+      pendingToolCall = null;
+      if (call) {
+        // A tool turn, as the runtime really produces it: the assistant
+        // message carrying the tool call is emitted first (message_end runs
+        // before the tool executes), then the tool runs, then the follow-up
+        // text message arrives.
+        const callId = `call-${assistantTurns}`;
+        const toolMessage = {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            ...(call.text ? [{ type: "text", text: call.text }] : []),
+            { type: "toolCall", id: callId, name: call.name, arguments: call.params },
+          ],
+        };
+        const toolHandler = events["message_end"];
+        if (toolHandler) {
+          try {
+            const result = await toolHandler({ type: "message_end", message: toolMessage }, activeCtx);
+            if (result && result.message) Object.assign(toolMessage, result.message);
+          } catch {
+            // keep the original message if the handler fails
+          }
+        }
+        branchArr.push({ type: "message", message: toolMessage });
+        await new Promise((r) => setTimeout(r, 20));
+        const tool = tools[call.name];
+        if (tool) {
+          try {
+            await tool.execute(callId, call.params, undefined, undefined, activeCtx);
+          } catch (error) {
+            toolErrors.push(String(error));
+          }
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
       let message = {
         role: "assistant",
         stopReason: "end",
@@ -163,6 +203,8 @@ const reset = () => {
   assistantScript.length = 0;
   assistantTextOverride = null;
   assistantTurns = 0;
+  pendingToolCall = null;
+  toolErrors.length = 0;
 };
 
 // --- registration ------------------------------------------------------------
@@ -640,7 +682,7 @@ check("report: repair fails -> warning", notifies.some((n) => n.startsWith("[war
 check("report: still only one repair turn", sent.length === 3, `got ${sent.length}`);
 check(
   "report: repair failure names the step and stops the pipeline",
-  notifies.some((n) => n.includes("did not emit HARNESS-DONE") && n.includes("implementer")),
+  notifies.some((n) => n.includes("did not report") && n.includes("implementer")),
   notifies.join(" | "),
 );
 
@@ -786,7 +828,7 @@ await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
 check("strict: missing decision marker stops the pipeline", sent.length === 1, `got ${sent.length}`);
 check(
   "strict: missing marker is reported as an error",
-  notifies.some((n) => n.startsWith("[error]") && n.includes("no usable decision marker")),
+  notifies.some((n) => n.startsWith("[error]") && n.includes("declared no decision")),
   notifies.join(" | "),
 );
 
@@ -816,7 +858,7 @@ check("report: an intermediate step is verified", sent.length === 3, `got ${sent
 check("report: the repair prompt names the step", sent[2]?.includes('"explorer"'), String(sent[2]).slice(0, 90));
 check(
   "report: the pipeline stops when a step still omits the marker",
-  notifies.some((n) => n.includes("did not emit HARNESS-DONE") && n.includes("explorer")),
+  notifies.some((n) => n.includes("did not report") && n.includes("explorer")),
   notifies.join(" | "),
 );
 check(
@@ -882,6 +924,95 @@ if (gateReady) {
 } else {
   console.log("SKIP preflight gate tests: git is unavailable in this environment");
 }
+
+// --- P1-5: structured control tools -------------------------------------------
+check("control tools are registered", !!tools["harness_decision"] && !!tools["harness_report"]);
+check(
+  "normalizeDecision accepts sloppy casing and rejects nonsense",
+  mod.normalizeDecision("PIPELINE") === "pipeline" &&
+    mod.normalizeDecision(" answer_only ") === "answer_only" &&
+    mod.normalizeDecision("nope") === null &&
+    mod.normalizeDecision(7) === null,
+);
+check("lastAssistantHasToolCall reads the newest assistant message", mod.lastAssistantHasToolCall(makeCtx(tmp, true)) === false);
+
+const noPipelineCtx = makeCtx(tmp, true);
+const inertDecision = await tools["harness_decision"].execute("c0", { decision: "PIPELINE" }, undefined, undefined, noPipelineCtx);
+const inertReport = await tools["harness_report"].execute("c1", { changed_files: ["a.ts"] }, undefined, undefined, noPipelineCtx);
+check(
+  "control tools are inert outside a pipeline",
+  inertDecision.content[0].text.includes("No harness pipeline") && inertReport.content[0].text.includes("No harness pipeline"),
+  `${inertDecision.content[0].text} / ${inertReport.content[0].text}`,
+);
+
+const badDecision = await tools["harness_decision"]
+  .execute("c2", { decision: "maybe" }, undefined, undefined, makeCtx(tmp, true))
+  .then(() => "resolved", (error) => error);
+check(
+  "harness_decision throws on an unusable value (the runtime only marks throws as errors)",
+  badDecision instanceof Error && badDecision.message.includes("ANSWER_ONLY"),
+  String(badDecision),
+);
+
+// Tool decision on a multi-step pipeline: runs, no short-circuit, no repair.
+const cfgControl = await fs.readFile(cfgPath, "utf8");
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "pipeline", reason: "files must change" } };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "cambiar algo", waitTurn);
+check("tool: a decision call runs the whole pipeline", sent.length === 2, `got ${sent.length}`);
+check("tool: no repair turn when the decision came from the tool", !sent.some((s) => s.includes("no usable decision")), sent.length + "");
+check(
+  "tool: the reason is surfaced for the operator",
+  notifies.some((n) => n.includes("Orchestrator decision: pipeline") && n.includes("files must change")),
+  notifies.join(" | "),
+);
+check("tool: sloppy casing is accepted", toolErrors.length === 0, toolErrors.join(" | "));
+
+// ANSWER_ONLY through the tool short-circuits exactly like the marker.
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" } };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "una pregunta", waitTurn);
+check("tool: ANSWER_ONLY short-circuits after step 1", sent.length === 1, `got ${sent.length}`);
+check(
+  "tool: short-circuit footer shows 1/1 with the decision",
+  statuses.at(-1)?.includes("1/1 orchestrator") && statuses.at(-1)?.includes("decision: answer_only"),
+  String(statuses.at(-1)),
+);
+
+// The tool wins over a contradicting marker, thanks to the runtime ordering:
+// message_end (which reads the marker) runs BEFORE the tool executes.
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" }, text: "Done.\n\nHARNESS-DECISION: PIPELINE" };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "contradicción", waitTurn);
+check("tool: the tool beats a contradicting marker in the same message", sent.length === 1, `got ${sent.length}`);
+
+// Lowercase decision must not stop the pipeline (the enum trap the critic flagged).
+reset();
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" }, text: "Done.\n\nHARNESS-DECISION: PIPELINE" };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "contradicción invertida", waitTurn);
+check("tool: lowercase decision is normalized, not rejected", sent.length === 1 && toolErrors.length === 0, `sent=${sent.length} ${toolErrors.join("|")}`);
+
+// A report call satisfies the per-step guarantee with no HARNESS-DONE at all.
+reset();
+pendingToolCall = null;
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea con report tool", waitTurn, "full-dry-run");
+check("report tool: the text marker still works as a fallback", sent.length === 3, `got ${sent.length}`);
+
+// harness_report replaces HARNESS-DONE for the last step.
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+pendingToolCall = {
+  name: "harness_report",
+  params: { changed_files: ["a.ts", "b.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "listo" },
+};
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea con report", waitTurn);
+check("report tool: a harness_report call satisfies the step with no marker", sent.length === 2, `got ${sent.length}`);
+check(
+  "report tool: no repair turn and no missing-report warning",
+  !notifies.some((n) => n.includes("did not report")) && !notifies.some((n) => n.includes("report is missing")),
+  notifies.join(" | "),
+);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

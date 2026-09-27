@@ -54,6 +54,38 @@ type ReasoningLevelArg = ThinkingLevelArg | "off";
 /** Last orchestrator decision recorded for this runtime (shown in the footer). */
 let lastDecision: HarnessDecision = null;
 
+/** Justification the orchestrator gave with the decision tool, if any. */
+let lastDecisionReason = "";
+
+/** Structured report of the step that just finished, when it used the tool. */
+let lastReport: HarnessReport | null = null;
+
+/** True while a pipeline is running: the harness tools are inert outside one. */
+let pipelineActive = false;
+
+export interface HarnessReport {
+  changedFiles: string[];
+  checks: { command: string; result: "passed" | "failed" | "skipped" }[];
+  notes: string;
+}
+
+/** Normalize a decision argument from a tool call: models are case-sloppy. */
+export function normalizeDecision(value: unknown): HarnessDecision {
+  if (typeof value !== "string") return null;
+  const key = value.trim().toUpperCase();
+  if (key === "ANSWER_ONLY") return "answer_only";
+  if (key === "PIPELINE") return "pipeline";
+  return null;
+}
+
+/** Normalize one check result from a tool call; unknown values read as skipped. */
+function normalizeCheckResult(value: unknown): HarnessReport["checks"][number]["result"] {
+  const key = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (key === "passed" || key === "pass" || key === "ok") return "passed";
+  if (key === "failed" || key === "fail") return "failed";
+  return "skipped";
+}
+
 /** Last pipeline progress line shown in the footer (null when no run is active). */
 let lastProgress: string | null = null;
 
@@ -528,8 +560,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  */
 function reportRepairPrompt(agentName: string): string {
   return (
-    `The previous response from "${agentName}" ended without the completion marker \`HARNESS-DONE\` and without the report in the required format (### Changes / ### Evidence / ### Notes for delivery). ` +
-    "Emit the full final report now, ending with `HARNESS-DONE`."
+    `The previous response from "${agentName}" ended without a completion report: no \`harness_report\` call and no \`HARNESS-DONE\` marker, and no report in the required format (### Changes / ### Evidence / ### Notes for delivery). ` +
+    "Write the full report now and call harness_report(changed_files, checks, notes) — or end with `HARNESS-DONE` if the tool is unavailable."
   );
 }
 
@@ -561,6 +593,12 @@ async function confirmPreflightBlock(
  * Turn wait for the auto-harness `input` hook, where ctx.waitForIdle() is not
  * available: wait for a new assistant message to appear and the session to go
  * idle. Falls back after 8 s of idleness with no output (turn never started).
+ *
+ * A turn that calls a tool produces several assistant messages (the tool call,
+ * then the text), and the session is briefly idle between them. Waiting on
+ * "some output + idle" would return on the tool-call message and read the step
+ * as finished, so a message that still carries a pending tool call never
+ * satisfies the wait.
  */
 async function pollIdle(ctx: ExtensionContext): Promise<void> {
   const countAssistants = () =>
@@ -572,10 +610,24 @@ async function pollIdle(ctx: ExtensionContext): Promise<void> {
   let sawOutput = false;
   for (;;) {
     if (countAssistants() > base) sawOutput = true;
-    if (sawOutput && ctx.isIdle()) return;
+    if (sawOutput && !lastAssistantHasToolCall(ctx) && ctx.isIdle()) return;
     if (!sawOutput && ctx.isIdle() && Date.now() - started > 8000) return;
     await sleep(150);
   }
+}
+
+/** True when the newest assistant message still carries an unexecuted tool call. */
+export function lastAssistantHasToolCall(ctx: ExtensionContext): boolean {
+  const branch = ctx.sessionManager.getBranch();
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i] as {
+      type?: string;
+      message?: { role?: string; content?: Array<{ type?: string }> };
+    };
+    if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+    return (entry.message.content ?? []).some((part) => part?.type === "toolCall");
+  }
+  return false;
 }
 
 export interface RepositoryState {
@@ -754,6 +806,9 @@ export async function runPipeline(
   // that dirties the tree itself does not block the next one.
   let pendingPreflightBlock = preflightPolicy(lines) === "blocking" ? formatBlockingPreflight(repositoryState) : [];
   lastDecision = null;
+  lastDecisionReason = "";
+  lastReport = null;
+  pipelineActive = true;
   lastProgress = null;
   let touchedModel = false;
   let touchedThinking = false;
@@ -865,7 +920,14 @@ export async function runPipeline(
       // first step, so the remaining pipeline is unnecessary. The decision is
       // read before the report marker below, so a legitimate ANSWER_ONLY answer
       // is never "repaired" for a report it does not owe.
+      // `lastDecision` is the tool's value when the orchestrator called the
+      // tool (its execute ran during the turn); the textual marker is only the
+      // fallback for prompts that have not migrated yet.
       const decision = lastDecision ?? parseHarnessDecision(turn?.text ?? "");
+      if (i === 0 && lastDecisionReason) {
+        ctx.ui.notify(`Orchestrator decision: ${decision ?? "(none)"} — ${lastDecisionReason}`, "info");
+        lastDecisionReason = "";
+      }
       if (i === 0 && steps.length > 1 && questionShortCircuit) {
         if (decision === "answer_only") {
           shortCircuited = true;
@@ -875,7 +937,8 @@ export async function runPipeline(
         // let the mutating steps run on a task that may need no file at all.
         if (decision === null && strictDecisionMarker) {
           ctx.ui.notify(
-            `Pipeline stopped: the orchestrator's reply has no usable decision marker on its last line. Expected "HARNESS-DECISION: ANSWER_ONLY" or "HARNESS-DECISION: PIPELINE" as the final line. ` +
+            `Pipeline stopped: the orchestrator declared no decision. Call harness_decision(ANSWER_ONLY | PIPELINE), ` +
+              "or end the reply with HARNESS-DECISION: ANSWER_ONLY / HARNESS-DECISION: PIPELINE as its last line. " +
               "Re-run the task, or set defaults.strict_decision_marker: false to let the pipeline continue without it.",
             "error",
           );
@@ -887,20 +950,23 @@ export async function runPipeline(
       // Step 1 is exempt: the orchestrator's job is the decision plus the
       // handoff, not the report contract, and asking it for one would cost an
       // adopter an extra turn on a path that has always worked without it.
+      // A harness_report call satisfies it; the textual marker is the fallback.
       if (!shortCircuited && decision !== "answer_only" && i > 0) {
-        if (!turn || !/\bHARNESS-DONE\b/.test(turn.text)) {
+        if (!lastReport && (!turn || !/\bHARNESS-DONE\b/.test(turn.text))) {
           pi.sendUserMessage(reportRepairPrompt(agentName));
           await waitForTurn();
           const repaired = lastAssistantTurn(ctx);
-          if (!repaired || !/\bHARNESS-DONE\b/.test(repaired.text)) {
+          if (!lastReport && (!repaired || !/\bHARNESS-DONE\b/.test(repaired.text))) {
             reportMissing = true;
             ctx.ui.notify(
-              `Pipeline stopped: step ${i + 1} (${agentName}) did not emit HARNESS-DONE after one repair turn.`,
+              `Pipeline stopped: step ${i + 1} (${agentName}) did not report (no harness_report call and no HARNESS-DONE) after one repair turn.`,
               "error",
             );
             break;
           }
         }
+        // The report belongs to this step only: forget it before the next one.
+        lastReport = null;
       }
     }
   } finally {
@@ -914,6 +980,8 @@ export async function runPipeline(
     if (touchedThinking) pi.setThinkingLevel(originalThinking);
     // A question ends at `1/1 <first>`; a finished pipeline clears the progress.
     lastProgress = shortCircuited && steps.length > 0 ? `1/1 ${steps[0]}` : null;
+    pipelineActive = false;
+    lastReport = null;
     await refreshModeStatus(ctx);
   }
 
@@ -1200,6 +1268,79 @@ async function buildDispatchParams(): Promise<Record<string, unknown>> {
     },
     required: ["tasks"],
     additionalProperties: false,
+  };
+}
+
+/**
+ * Parameter schemas for the harness control tools.
+ *
+ * Deliberately no `enum`: the text marker this replaces was case-insensitive,
+ * so a strict enum would reject "pipeline" from a model and turn a cosmetic
+ * slip into a pipeline stop. The schema stays tolerant and `execute`
+ * normalizes and validates, throwing on anything unusable.
+ */
+async function buildControlToolParams(): Promise<Record<string, unknown> | null> {
+  const decisionDescription = "ANSWER_ONLY when the task needs no file change, PIPELINE when it does";
+  const reasonDescription = "One line of justification, shown in the status bar";
+  const changedFilesDescription = "Repository-relative paths this step changed";
+  const commandDescription = "The check command as it was run";
+  const resultDescription = "passed | failed | skipped";
+  const notesDescription = "What the delivery step must know";
+
+  let T: typeof import("typebox").Type | undefined;
+  try {
+    T = (await import("typebox")).Type;
+  } catch {
+    T = undefined;
+  }
+  if (T) {
+    return {
+      harness_decision: T.Object({
+        decision: T.String({ description: decisionDescription }),
+        reason: T.Optional(T.String({ description: reasonDescription })),
+      }) as unknown as Record<string, unknown>,
+      harness_report: T.Object({
+        changed_files: T.Optional(T.Array(T.String({ description: changedFilesDescription }))),
+        checks: T.Optional(
+          T.Array(
+            T.Object({
+              command: T.String({ description: commandDescription }),
+              result: T.String({ description: resultDescription }),
+            }),
+          ),
+        ),
+        notes: T.Optional(T.String({ description: notesDescription })),
+      }) as unknown as Record<string, unknown>,
+    };
+  }
+  return {
+    harness_decision: {
+      type: "object",
+      properties: {
+        decision: { type: "string", description: decisionDescription },
+        reason: { type: "string", description: reasonDescription },
+      },
+      required: ["decision"],
+    },
+    harness_report: {
+      type: "object",
+      properties: {
+        changed_files: { type: "array", items: { type: "string" }, description: changedFilesDescription },
+        checks: {
+          type: "array",
+          description: "Checks actually run, with their outcome",
+          items: {
+            type: "object",
+            properties: {
+              command: { type: "string", description: commandDescription },
+              result: { type: "string", description: resultDescription },
+            },
+            required: ["command"],
+          },
+        },
+        notes: { type: "string", description: notesDescription },
+      },
+    },
   };
 }
 
@@ -1570,6 +1711,8 @@ export default async function harnessExtension(pi: ExtensionAPI) {
   // (also runs after /reload, which rebuilds the extension runtime).
   pi.on("session_start", (_event, ctx) => {
     lastDecision = null;
+    lastDecisionReason = "";
+    lastReport = null;
     lastProgress = null;
     return refreshModeStatus(ctx);
   });
@@ -1600,9 +1743,14 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     }
     if (!changed) return {};
     if (decision !== null) {
-      lastDecision = decision;
-      lastProgress = await computeDecisionProgress(ctx, decision);
-      await refreshModeStatus(ctx);
+      // Only when still empty: a harness_decision call runs after this hook
+      // (the runtime emits message_end, then executes tool calls) and must
+      // keep the last word when both a marker and a tool call disagree.
+      if (lastDecision === null) {
+        lastDecision = decision;
+        lastProgress = await computeDecisionProgress(ctx, decision);
+        await refreshModeStatus(ctx);
+      }
     }
     return { message: { ...message, content } as unknown as typeof event.message };
   });
@@ -1975,4 +2123,107 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       };
     },
   });
+
+  // -------------------------------------------------------------------------
+  // Control tools: the structured replacement for the textual markers. The
+  // markers stay as a one-release fallback for prompts and adopters that have
+  // not migrated yet; the tool always wins when both are present.
+  // -------------------------------------------------------------------------
+  const controlParams = await buildControlToolParams();
+  if (controlParams) {
+    pi.registerTool({
+      name: "harness_decision",
+      label: "Harness decision",
+      description: [
+        "Declare whether this task needs file changes at all.",
+        "ANSWER_ONLY ends the harness pipeline after this step; PIPELINE continues with the remaining steps.",
+        "Call it once, at the end, instead of writing a HARNESS-DECISION line.",
+      ].join(" "),
+      promptSnippet: "End a harness orchestrator turn with harness_decision(ANSWER_ONLY | PIPELINE) instead of a text marker.",
+      promptGuidelines: [
+        "Call harness_decision exactly once, at the end of the turn, when running as the orchestrator step of a harness pipeline.",
+        "Do not call it in ordinary conversation: it only has an effect inside a pipeline.",
+      ],
+      parameters: controlParams.harness_decision as never,
+      async execute(_toolCallId, params) {
+        const decision = normalizeDecision((params as { decision?: unknown }).decision);
+        if (decision === null) {
+          // Throw: the runtime marks a thrown tool as an error, while an
+          // `isError` field on a returned result is ignored.
+          throw new Error('decision must be "ANSWER_ONLY" or "PIPELINE".');
+        }
+        const reason = typeof (params as { reason?: unknown }).reason === "string" ? (params as { reason: string }).reason : "";
+        if (!pipelineActive) {
+          return {
+            content: [{ type: "text" as const, text: "Recorded. (No harness pipeline is running, so this has no effect.)" }],
+            details: undefined,
+          };
+        }
+        // Assign unconditionally: the message_end hook runs BEFORE this
+        // execute (the runtime emits message_end, then executes tool calls),
+        // so a "only when empty" guard here would let the text marker win.
+        lastDecision = decision;
+        lastDecisionReason = reason.trim();
+        return {
+          content: [{ type: "text" as const, text: `Decision recorded: ${decision}.` }],
+          details: undefined,
+        };
+      },
+    });
+
+    pi.registerTool({
+      name: "harness_report",
+      label: "Harness report",
+      description: [
+        "Record the structured report of a finished harness step.",
+        "Use it instead of the HARNESS-DONE line: the harness verifies the tool call, not the text.",
+        "The markdown report is still written in the reply; this adds machine-readable data.",
+      ].join(" "),
+      promptSnippet: "End a harness agent step with harness_report(changed_files, checks, notes) alongside the written report.",
+      promptGuidelines: [
+        "Call harness_report exactly once, at the end of the turn, when finishing a harness pipeline step that owes a report.",
+        "changed_files lists the paths you actually changed; checks lists the commands you actually ran, with their outcome.",
+        "Report every check you could not run as skipped. Do not claim a check you did not run.",
+      ],
+      parameters: controlParams.harness_report as never,
+      async execute(_toolCallId, params) {
+        if (!pipelineActive) {
+          return {
+            content: [{ type: "text" as const, text: "Recorded. (No harness pipeline is running, so this has no effect.)" }],
+            details: undefined,
+          };
+        }
+        const raw = params as {
+          changed_files?: unknown;
+          checks?: unknown;
+          notes?: unknown;
+        };
+        const changedFiles = Array.isArray(raw.changed_files)
+          ? raw.changed_files.filter((p): p is string => typeof p === "string")
+          : [];
+        const checks = Array.isArray(raw.checks)
+          ? raw.checks
+              .filter((c): c is { command: unknown; result?: unknown } => !!c && typeof c === "object")
+              .map((c) => ({
+                command: String((c as { command: unknown }).command ?? ""),
+                result: normalizeCheckResult((c as { result?: unknown }).result),
+              }))
+          : [];
+        lastReport = {
+          changedFiles,
+          checks,
+          notes: typeof raw.notes === "string" ? raw.notes : "",
+        };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Report recorded: ${changedFiles.length} file(s), ${checks.length} check(s).`,
+            },
+          ],
+          details: undefined,
+        };
+      },
+    });
+  }
 }

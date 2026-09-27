@@ -30,18 +30,20 @@ Two ways to adopt it:
   supported reasoning effort), `/harness-run <task>`, `/harness-delivery
   [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
   delivery agent without changing `defaults.workflow_mode`.
-- The orchestrator ends every turn with exactly one marker, on the **last
-  non-empty line** of its reply:
-  `HARNESS-DECISION: ANSWER_ONLY` (questions and tasks that change no files —
-  the pipeline stops) or `HARNESS-DECISION: PIPELINE` (files must change).
-  A marker quoted earlier in the reply is an example, not a decision. The
-  harness moves the marker to the footer; it is not part of the visible
-  answer. With `defaults.strict_decision_marker` on, a reply with no usable
-  marker stops the pipeline instead of assuming `PIPELINE`.
-- Every non-orchestrator agent ends its reply with `HARNESS-DONE`, after a
-  report in the form `### Changes` / `### Evidence` / `### Notes for delivery`.
-  The harness verifies the marker after every step; if it is missing, it sends
-  one repair turn for that step and stops if it is still missing.
+- The orchestrator declares its decision with the `harness_decision` tool, once
+  at the end of its turn: `ANSWER_ONLY` (questions and tasks that change no
+  files — the pipeline stops) or `PIPELINE` (files must change), with a one-line
+  `reason`. Without the tool, the fallback is one marker on the last line:
+  `HARNESS-DECISION: ANSWER_ONLY` or `HARNESS-DECISION: PIPELINE`. The harness
+  moves the decision to the footer; it is not part of the visible answer. With
+  `defaults.strict_decision_marker` on, a turn with no usable decision stops the
+  pipeline instead of assuming `PIPELINE`.
+- Every non-orchestrator agent writes a report in the form `### Changes` /
+  `### Evidence` / `### Notes for delivery` **and** calls `harness_report` with
+  `changed_files`, `checks` and `notes`. Without the tool, the fallback is
+  `HARNESS-DONE` as the last line. The harness verifies the call first and the
+  marker second; if neither is present it sends one repair turn for that step
+  and stops if the report is still missing.
 - Reports are evidence-based: name the files changed, the checks actually run,
   and every check that could not be run.
 - The harness performs a repository preflight before a pipeline. Warn the user
