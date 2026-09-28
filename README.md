@@ -42,7 +42,7 @@ workflow you can actually audit.
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
 | Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
-| Tests | `node tests/harness.test.mjs` (136 checks) and `node tests/install.test.mjs` (3 installer tests) |
+| Tests | `node tests/harness.test.mjs` (139 checks) and `node tests/install.test.mjs` (3 installer tests) |
 
 ## Install in your Pi project
 
@@ -140,7 +140,8 @@ and validate with `/harness-config`.
 
   Restart Pi (or run `/reload`) afterward. `pi-engram init` writes the package
   declarations to Pi's `settings.json` and the Engram MCP server to
-  `~/.pi/agent/mcp.json`, including `engram mcp --tools=agent`; it also keeps
+  `~/.pi/agent/mcp.json` (`%USERPROFILE%\.pi\agent\mcp.json` on Windows),
+  including `engram mcp --tools=agent`; it also keeps
   MCP tools from duplicating Pi's native `mem_*` tools. The Engram binary itself
   must be installed separately. Normally you do not need to run `engram serve`:
   Engram starts it on demand. Use `pi-engram init --force` only to replace an

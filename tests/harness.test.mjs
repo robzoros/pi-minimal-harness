@@ -3,18 +3,41 @@
  *
  * Run with:  node tests/harness.test.mjs
  *
+ * Platform: Windows, macOS and Linux. Paths come from `os.tmpdir()` and the
+ * extension is imported through `pathToFileURL`, so no WSL/Posix-only path is
+ * assumed. Node releases before 22.18 cannot import the TypeScript extension
+ * without a flag, so the test re-runs itself with it instead of failing.
+ *
  * Drives the registered commands, events and tool with fakes and asserts the
  * pipeline, footer status, question short-circuit, final-report guarantee,
  * decision handling, validation and the dispatch seams. Never touches the real
  * harness.config.yaml: everything runs against a temp copy of the project.
  */
 
+import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const mod = await import(`file://${ROOT}/.pi/extensions/harness.ts`);
+const SELF = fileURLToPath(import.meta.url);
+const ROOT = path.resolve(path.dirname(SELF), "..");
+
+// Node < 22.18 needs --experimental-strip-types to import harness.ts. Re-run
+// the whole smoke test once with the flag, keeping the documented command.
+if (!process.features?.typescript && !process.env.PI_HARNESS_TS_RESPAWN) {
+  const respawn = spawnSync(process.execPath, ["--experimental-strip-types", SELF], {
+    stdio: "inherit",
+    env: { ...process.env, PI_HARNESS_TS_RESPAWN: "1" },
+  });
+  if (respawn.error) {
+    console.error(`FAIL cannot re-run with --experimental-strip-types — ${respawn.error.message}`);
+    process.exit(1);
+  }
+  process.exit(respawn.status ?? 1);
+}
+
+const mod = await import(pathToFileURL(path.join(ROOT, ".pi", "extensions", "harness.ts")).href);
 
 let failures = 0;
 const check = (name, cond, extra = "") => {
@@ -23,7 +46,7 @@ const check = (name, cond, extra = "") => {
 };
 
 // --- temp project: config (forced state) + prompts + contract ---------------
-const tmp = await fs.mkdtemp(path.join("/tmp", "harness-test-"));
+const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "harness-test-"));
 const cfgPath = path.join(tmp, "harness.config.yaml");
 let cfgText = await fs.readFile(path.join(ROOT, "harness.config.yaml"), "utf8");
 // Force the flags this test depends on, so it never depends on live config state.

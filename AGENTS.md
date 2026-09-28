@@ -61,7 +61,8 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   with an error without one. Agents without the field are assumed to mutate
   files, so validation lists them.
 - Memory is provided by the user-level `gentle-engram` Pi package together with
-  `pi-mcp-adapter` (`~/.pi/agent/mcp.json` → `engram mcp --tools=agent`): it owns
+  `pi-mcp-adapter` (`~/.pi/agent/mcp.json` — `%USERPROFILE%\.pi\agent\mcp.json`
+  on Windows — `engram mcp --tools=agent`): it owns
   session registration, passive capture, the `mem_*` tools, the injected Memory
   Protocol, compaction recovery and `<private>` redaction. The harness neither
   gates nor duplicates it; project detection comes from the server's
@@ -90,7 +91,10 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   short-circuit, per-step report guarantee, decision handling (including the
   strict decision marker and the blocking preflight), validation and the
   dispatch seams. Run it after every extension change (`node tests/harness.test.mjs`)
-  and report pass/fail counts. `node tests/install.test.mjs` covers the installer.
+  and report pass/fail counts; the test re-runs itself with
+  `--experimental-strip-types` on Node releases before 22.18.
+  `node tests/install.test.mjs` covers the installer. Both must pass on Windows,
+  macOS and Linux: never assume a Posix-only path such as `/tmp`.
 - Inspect the changed regions (git exists: confirm with `git status`/reads and
   by confirming no unintended file changed).
 - TUI end-to-end requires `/reload` in an interactive Pi session; report it as
