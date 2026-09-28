@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `harness-dispatch` reported its failures by returning `{ isError: true }`, but
+  `AgentToolResult` has no such field and the Pi runtime only marks a tool call
+  as an error when `execute` throws. Every dispatch gate failure (disabled
+  dispatch, unknown agent, empty brief, missing contract file, unsupported
+  model effort) was therefore recorded as a **success**. The failure paths now
+  throw, and a batch in which every agent failed throws with the per-agent
+  summary in the message so the model still sees why. A partial batch still
+  resolves normally and reports the failures in its text.
+
 ### Added
 
 - Control tools `harness_decision` and `harness_report`: the pipeline's
