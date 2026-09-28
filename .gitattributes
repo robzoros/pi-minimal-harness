@@ -1,0 +1,4 @@
+# Keep the working tree LF on every platform, so a Windows checkout with
+# core.autocrlf enabled does not rewrite line endings (the harness edits the
+# YAML config in place and the smoke test asserts on exact lines).
+* text=auto eol=lf

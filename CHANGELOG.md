@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The smoke test only ran on Posix hosts: it built its temporary project under
+  the hardcoded `/tmp` (absent on Windows) and imported the extension through a
+  hand-built `file://` string. It now uses `os.tmpdir()` and `pathToFileURL`,
+  and `node tests/harness.test.mjs` works unchanged on Windows, macOS and
+  Linux.
+- `node tests/harness.test.mjs` failed with `ERR_UNKNOWN_FILE_EXTENSION ".ts"`
+  on Node releases before 22.18, which cannot import the TypeScript extension
+  without `--experimental-strip-types`. The test now re-runs itself with the
+  flag when the runtime lacks TypeScript support.
+- A Windows checkout with `core.autocrlf` enabled could rewrite the repository
+  to CRLF. `.gitattributes` pins the working tree to LF.
+
+- `harness-dispatch` reported its failures by returning `{ isError: true }`, but
+  `AgentToolResult` has no such field and the Pi runtime only marks a tool call
+  as an error when `execute` throws. Every dispatch gate failure (disabled
+  dispatch, unknown agent, empty brief, missing contract file, unsupported
+  model effort) was therefore recorded as a **success**. The failure paths now
+  throw, and a batch in which every agent failed throws with the per-agent
+  summary in the message so the model still sees why. A partial batch still
+  resolves normally and reports the failures in its text.
+
 ### Added
 
 - Control tools `harness_decision` and `harness_report`: the pipeline's

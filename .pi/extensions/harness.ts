@@ -1060,6 +1060,17 @@ function capDispatchOutput(text: string): { text: string; truncated: boolean } {
   };
 }
 
+/**
+ * Outcome line for a dispatch batch, plus the per-agent summaries.
+ *
+ * Pure and exported so the success/failure decision is testable without
+ * spawning a real subagent process: a partial batch must resolve with this
+ * text, a fully failed batch must throw it.
+ */
+export function formatDispatchOutcome(total: number, failedCount: number, summaries: string[]): string {
+  return `${total - failedCount}/${total} dispatched agents ok\n\n${summaries.join("\n\n---\n\n")}`;
+}
+
 /** Run one isolated subagent process and collect its final text. */
 export async function runDispatchTask(opts: {
   cwd: string;
@@ -1944,11 +1955,13 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     ],
     parameters: await buildDispatchParams(),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const fail = (message: string) => ({
-        content: [{ type: "text" as const, text: message }],
-        details: undefined,
-        isError: true,
-      });
+      // The runtime marks a tool call as an error only when execute throws: an
+      // `isError` field on a returned result is ignored, and `AgentToolResult`
+      // does not define one. Returning a "failed" object would record the
+      // call as a success, so every failure path below throws instead.
+      const fail = (message: string): never => {
+        throw new Error(message);
+      };
 
       const configPath = await resolveConfigPath(ctx.cwd);
       if (!configPath) return fail("No harness configuration found (harness.config.yaml).");
@@ -1971,7 +1984,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       }
       const prepared: Prepared[] = [];
       const tempDirs: string[] = [];
-      const failPrepared = async (message: string) => {
+      const failPrepared = async (message: string): Promise<never> => {
         for (const dir of tempDirs) {
           try {
             await fs.rm(dir, { recursive: true, force: true });
@@ -1979,7 +1992,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
             // best effort cleanup
           }
         }
-        return fail(message);
+        throw new Error(message);
       };
       for (const task of tasks) {
         const block = agentBlock(lines, task.agent);
@@ -2111,15 +2124,15 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         return `### [${item.agent}] ${status}\n\n${body}`;
       });
       const failedCount = results.filter((r) => !r?.ok).length;
+      const summary = formatDispatchOutcome(total, failedCount, summaries);
+      // Throwing is what marks the call as a failure, so a batch where every
+      // agent failed throws with the summary in the message: the model still
+      // sees which agents failed and why. A partial batch is a success that
+      // reports the failures in its text.
+      if (failedCount === total) throw new Error(summary);
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `${total - failedCount}/${total} dispatched agents ok\n\n${summaries.join("\n\n---\n\n")}`,
-          },
-        ],
+        content: [{ type: "text" as const, text: summary }],
         details: undefined,
-        isError: failedCount === total,
       };
     },
   });

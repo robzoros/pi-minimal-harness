@@ -3,18 +3,41 @@
  *
  * Run with:  node tests/harness.test.mjs
  *
+ * Platform: Windows, macOS and Linux. Paths come from `os.tmpdir()` and the
+ * extension is imported through `pathToFileURL`, so no WSL/Posix-only path is
+ * assumed. Node releases before 22.18 cannot import the TypeScript extension
+ * without a flag, so the test re-runs itself with it instead of failing.
+ *
  * Drives the registered commands, events and tool with fakes and asserts the
  * pipeline, footer status, question short-circuit, final-report guarantee,
  * decision handling, validation and the dispatch seams. Never touches the real
  * harness.config.yaml: everything runs against a temp copy of the project.
  */
 
+import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const mod = await import(`file://${ROOT}/.pi/extensions/harness.ts`);
+const SELF = fileURLToPath(import.meta.url);
+const ROOT = path.resolve(path.dirname(SELF), "..");
+
+// Node < 22.18 needs --experimental-strip-types to import harness.ts. Re-run
+// the whole smoke test once with the flag, keeping the documented command.
+if (!process.features?.typescript && !process.env.PI_HARNESS_TS_RESPAWN) {
+  const respawn = spawnSync(process.execPath, ["--experimental-strip-types", SELF], {
+    stdio: "inherit",
+    env: { ...process.env, PI_HARNESS_TS_RESPAWN: "1" },
+  });
+  if (respawn.error) {
+    console.error(`FAIL cannot re-run with --experimental-strip-types — ${respawn.error.message}`);
+    process.exit(1);
+  }
+  process.exit(respawn.status ?? 1);
+}
+
+const mod = await import(pathToFileURL(path.join(ROOT, ".pi", "extensions", "harness.ts")).href);
 
 let failures = 0;
 const check = (name, cond, extra = "") => {
@@ -23,7 +46,7 @@ const check = (name, cond, extra = "") => {
 };
 
 // --- temp project: config (forced state) + prompts + contract ---------------
-const tmp = await fs.mkdtemp(path.join("/tmp", "harness-test-"));
+const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "harness-test-"));
 const cfgPath = path.join(tmp, "harness.config.yaml");
 let cfgText = await fs.readFile(path.join(ROOT, "harness.config.yaml"), "utf8");
 // Force the flags this test depends on, so it never depends on live config state.
@@ -755,35 +778,62 @@ const rBig = await mod.runDispatchTask({ cwd: tmp, agent: "explorer", args: [], 
 check("runDispatchTask truncates output >50KB", rBig.truncated === true && rBig.text.includes("[Output truncated"), `len=${rBig.text.length}`);
 
 // Dispatch tool gates (never spawn for real in tests).
+// A failure must REJECT: the runtime only marks a thrown tool call as an error,
+// so asserting an `isError` field on a returned result would test a fiction the
+// fake happens to allow and real Pi silently ignores.
 const tool = tools["harness-dispatch"];
+const rejected = async (args, ctx) =>
+  tool.execute("t", args, undefined, undefined, ctx ?? makeCtx(tmp, false)).then(
+    (value) => ({ rejected: false, text: JSON.stringify(value) }),
+    (error) => ({ rejected: true, text: String(error?.message ?? error) }),
+  );
+
 const cfgOriginal = await fs.readFile(cfgPath, "utf8");
 await fs.writeFile(cfgPath, cfgOriginal.replace("  allow_dispatch: true", "  allow_dispatch: false"));
-const rDisabled = await tool.execute("t1", { tasks: [{ agent: "explorer", brief: "x" }] }, undefined, undefined, makeCtx(tmp, false));
-check("dispatch: disabled gate", rDisabled.isError === true && rDisabled.content[0].text.includes("disabled"), rDisabled.content[0].text);
+const rDisabled = await rejected({ tasks: [{ agent: "explorer", brief: "x" }] });
+check("dispatch: disabled gate rejects", rDisabled.rejected && rDisabled.text.includes("disabled"), rDisabled.text);
 await fs.writeFile(cfgPath, cfgOriginal);
 
-const rUnknown = await tool.execute("t2", { tasks: [{ agent: "nope", brief: "x" }] }, undefined, undefined, makeCtx(tmp, false));
-check("dispatch: unknown agent rejected", rUnknown.isError === true && rUnknown.content[0].text.includes("Unknown agent"), rUnknown.content[0].text);
+const rUnknown = await rejected({ tasks: [{ agent: "nope", brief: "x" }] });
+check("dispatch: unknown agent rejects", rUnknown.rejected && rUnknown.text.includes("Unknown agent"), rUnknown.text);
 
-const rEmpty = await tool.execute("t3", { tasks: [{ agent: "explorer", brief: "   " }] }, undefined, undefined, makeCtx(tmp, false));
-check("dispatch: empty brief rejected", rEmpty.isError === true && rEmpty.content[0].text.toLowerCase().includes("empty brief"), rEmpty.content[0].text);
+const rEmpty = await rejected({ tasks: [{ agent: "explorer", brief: "   " }] });
+check("dispatch: empty brief rejects", rEmpty.rejected && rEmpty.text.toLowerCase().includes("empty brief"), rEmpty.text);
+
+const rNoTasks = await rejected({ tasks: [] });
+check("dispatch: empty task list rejects", rNoTasks.rejected && rNoTasks.text.includes("between 1 and"), rNoTasks.text);
 
 const cfgUnsupported = cfgOriginal
   .replace("    model: opencode-go/gpt-5.1\n    reasoning: high", "    model: opencode-go/deepseek-v4.1-flash\n    reasoning: high");
 await fs.writeFile(cfgPath, cfgUnsupported);
-const rUnsupported = await tool.execute("t5", { tasks: [{ agent: "explorer", brief: "x" }] }, undefined, undefined, makeCtx(tmp, false));
+const rUnsupported = await rejected({ tasks: [{ agent: "explorer", brief: "x" }] });
 check(
-  "dispatch: unsupported model effort rejected",
-  rUnsupported.isError === true && rUnsupported.content[0].text.includes("not supported") && rUnsupported.content[0].text.includes("Available: off"),
-  rUnsupported.content[0].text,
+  "dispatch: unsupported model effort rejects",
+  rUnsupported.rejected && rUnsupported.text.includes("not supported") && rUnsupported.text.includes("Available: off"),
+  rUnsupported.text,
 );
 await fs.writeFile(cfgPath, cfgOriginal);
 
 const noUiCtx = makeCtx(tmp, false);
 noUiCtx.hasUI = false;
-const rNoUi = await tool.execute("t4", { tasks: [{ agent: "nope", brief: "x" }] }, undefined, undefined, noUiCtx);
-check("dispatch: works with hasUI false", rNoUi.isError === true);
+const rNoUi = await rejected({ tasks: [{ agent: "nope", brief: "x" }] }, noUiCtx);
+check("dispatch: rejects with hasUI false", rNoUi.rejected);
 check("dispatch: no widget written by gate failures", widgets.length === 0, `widgets=${widgets.length}`);
+
+// The success/failure split is pure text, so it is tested directly: covering it
+// through the tool would spawn a real `pi` subprocess, which this suite never
+// does (the gate tests above all return before any spawn).
+check(
+  "dispatch: partial batch reports a resolved outcome",
+  mod.formatDispatchOutcome(2, 1, ["### [explorer] ok", "### [critic] failed"]).startsWith("1/2 dispatched agents ok"),
+  mod.formatDispatchOutcome(2, 1, []),
+);
+check(
+  "dispatch: total failure reports 0 ok and keeps every per-agent summary",
+  mod.formatDispatchOutcome(2, 2, ["### [explorer] failed", "### [critic] failed"]).includes("0/2 dispatched agents ok") &&
+    mod.formatDispatchOutcome(2, 2, ["### [explorer] failed", "### [critic] failed"]).includes("### [critic] failed"),
+  mod.formatDispatchOutcome(2, 2, ["### [explorer] failed"]),
+);
 
 // --- auto-harness input hook -------------------------------------------------
 notifies.length = 0;
