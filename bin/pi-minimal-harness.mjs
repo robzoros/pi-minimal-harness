@@ -93,7 +93,10 @@ async function copyFileIfAllowed(source, destination, options, report) {
       return;
     }
     if (!options.force) {
-      throw new Error(`Refusing to overwrite ${destination}. Re-run with --force to replace it.`);
+      const hint = harnessOwned(destination)
+        ? " This project already has the harness: 'npx pi-minimal-harness update' refreshes an installation."
+        : "";
+      throw new Error(`Refusing to overwrite ${destination}. Re-run with --force to replace it.${hint}`);
     }
     report.push(`replace ${path.relative(options.project, destination) || destination}`);
   } else {
@@ -103,6 +106,12 @@ async function copyFileIfAllowed(source, destination, options, report) {
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.copyFile(source, destination);
   }
+}
+
+/** True for the files the harness owns, which an installation always has. */
+function harnessOwned(destination) {
+  const relative = destination.split(path.sep).join("/");
+  return relative.includes("/.pi/extensions/harness.ts") || relative.includes("/prompts/");
 }
 
 async function walkFiles(directory) {
@@ -350,6 +359,22 @@ async function harnessContractText() {
   return lines.slice(start).join("\n").trim();
 }
 
+/**
+ * The contract an adopting project already carries, compared by content.
+ * The markers are only one way to have it: the documented "paste it into your
+ * AGENTS.md" path never writes them, so a section that already reads exactly
+ * like this release's contract is a match. Text that differs belongs to the
+ * project and is never rewritten, not even with --force.
+ */
+function contractSectionPresent(current, contract) {
+  if (!/## Harness workflow\b/.test(current)) return false;
+  const lines = current.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^## Harness workflow\s*$/.test(line));
+  if (start === -1) return false;
+  const section = lines.slice(start).join("\n").trim();
+  return section === contract || section.includes(contract);
+}
+
 async function appendHarnessContract(project, options, report) {
   const destination = path.join(project, "AGENTS.md");
   const contract = await harnessContractText();
@@ -368,13 +393,17 @@ async function appendHarnessContract(project, options, report) {
     if (!options.dryRun) await fs.writeFile(destination, updated, "utf8");
     return;
   }
+  if (contractSectionPresent(current, contract)) {
+    report.push(`unchanged ${path.relative(project, destination) || destination} (harness contract already present, pasted without installer markers)`);
+    return;
+  }
   if (/## Harness workflow\b/.test(current)) {
     if (!options.force) {
       report.push(`unchanged ${path.relative(project, destination) || destination} (existing harness workflow detected)`);
       return;
     }
     throw new Error(
-      `AGENTS.md already contains a harness workflow section without installer markers. Refusing to edit it automatically; merge the section manually or use a clean file.`,
+      `${destination} has a "## Harness workflow" section that differs from this release. Refusing to edit it automatically: replace that section with the one in AGENTS-addition.md, or delete it and re-run.`,
     );
   }
   const updated = current ? `${current.trimEnd()}\n\n${block}` : block;
@@ -442,9 +471,59 @@ async function ensureChangelog(project, options, report) {
   await fs.writeFile(destination, heading, "utf8");
 }
 
+/**
+ * An adopting project needs models before the pipeline can run, and the
+ * template ships placeholders. They are reported, never rejected: the installer
+ * has no model catalog, so /harness-config is what turns this into a hard
+ * failure, and by then the user knows why.
+ */
+async function reportTemplatePlaceholders(destination, report) {
+  if (!(await pathExists(destination))) return;
+  const lines = (await fs.readFile(destination, "utf8")).split(/\r?\n/);
+  const placeholders = lines.filter((line) => /^ {4}model:\s*provider\/model-id\s*$/.test(line)).length;
+  const project = lines.find((line) => /^project:\s*(.*)$/.test(line));
+  const projectPlaceholder = project && /^project:\s*my-project\s*$/.test(project);
+  if (placeholders > 0) {
+    report.push(`warning ${placeholders} agent(s) still use the template model placeholder (model: provider/model-id)`);
+  }
+  if (projectPlaceholder) {
+    report.push("warning project: is still the template placeholder (project: my-project)");
+  }
+}
+
+/** Documented prerequisite: the extension needs a Node that can load TypeScript. */
+function reportPrerequisites(report) {
+  const [major] = process.versions.node.split(".").map(Number);
+  if (Number.isFinite(major) && major < 22) {
+    report.push(`warning Node ${process.versions.node} found; the harness needs Node >= 22 to load the extension`);
+  }
+}
+
+/**
+ * `init` is for a project that does not have the harness yet. Once it is
+ * installed, `update` is the command that refreshes it: a half-applied `init`
+ * leaves the user believing they upgraded, so route instead of half-doing.
+ */
+async function findExistingInstall(project) {
+  if (await pathExists(path.join(project, "harness.config.yaml"))) return "harness.config.yaml";
+  if (await pathExists(path.join(project, ".pi", "extensions", "harness.ts"))) return path.join(".pi", "extensions", "harness.ts");
+  return null;
+}
+
 async function install(options) {
   const report = [];
-  await fs.mkdir(options.project, { recursive: true });
+  await fs.mkdir(options.project, {recursive: true });
+  reportPrerequisites(report);
+  if (options.command === "init") {
+    const existing = await findExistingInstall(options.project);
+    if (existing && !options.dryRun) {
+      // Not an error: init stays idempotent and additive on purpose, so a
+      // project with an edited config can still run it. But say plainly that
+      // update is the command that refreshes an installation, before doing
+      // anything, so nobody reads this run as an upgrade.
+      report.push(`note ${existing} is already here: this is an install, not an upgrade — 'npx pi-minimal-harness update' refreshes one`);
+    }
+  }
   await copyFileIfAllowed(
     path.join(PACKAGE_ROOT, ".pi", "extensions", "harness.ts"),
     path.join(options.project, ".pi", "extensions", "harness.ts"),
@@ -466,6 +545,7 @@ async function install(options) {
   );
   await appendHarnessContract(options.project, options, report);
   await ensureChangelog(options.project, options, report);
+  await reportTemplatePlaceholders(path.join(options.project, "harness.config.yaml"), report);
   await addLocalConfigExclude(options.project, options, report);
 
   const header = options.dryRun
@@ -484,6 +564,7 @@ async function install(options) {
     console.log("  2. Run /reload in Pi.");
     console.log("  3. Run /harness-config to validate the installation.");
   }
+  console.log("\nLater upgrades: npx pi-minimal-harness update");
 }
 
 try {

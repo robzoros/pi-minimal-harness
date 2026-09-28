@@ -74,8 +74,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summary in the message so the model still sees why. A partial batch still
   resolves normally and reports the failures in its text.
 
+- `init --force` failed on any project that pasted the contract into its
+  `AGENTS.md` by hand, which is what the README documented until now and what
+  the installer itself recommends. The contract was only recognised through the
+  installer markers, so a pasted section read as a conflict and `--force`
+  turned that into a hard error — `update` hit the same wall, which left the
+  first generation of adopters unable to upgrade without editing `AGENTS.md`
+  themselves. The section is now compared by content: present and unmodified
+  means `unchanged`, and the file is never rewritten. A section that *was*
+  edited is still refused, and `--force` still does not overwrite it.
+- The "refusing to overwrite" error sent you to `--force`, which is what the
+  `AGENTS.md` conflict then refused. The message now names `update`, the
+  command that actually upgrades an installation.
+- `init` on a project that already has the harness did half the work and
+  exited successfully, so an upgrade could look like it had happened. The
+  report now states, before anything is written, that this is an install and
+  that `update` is the upgrade command.
+
 ### Changed
 
+- A fresh install now reports the placeholders it shipped — the five
+  `model: provider/model-id` agents and `project: my-project` — in the report
+  and not only in a "Next steps" line. They are warnings, not errors: the
+  installer has no model catalog, but `/harness-config` fails until they are
+  set, and the user should hear it from the tool that wrote the file.
+- The installer warns when it runs on Node < 22, the documented prerequisite
+  for loading the extension. Not blocking: the installer can run on one Node
+  while Pi loads the extension with another.
 - `defaults.subagent_context_file` is no longer part of the shipped
   configuration: it is optional, because the contract is resolved by
   existence. Existing projects keep the key and keep working, including the
