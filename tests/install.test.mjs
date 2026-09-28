@@ -91,11 +91,110 @@ test("init refuses conflicts unless --force is supplied", async () => {
     const conflict = runInstaller(["init", "--project", project]);
     assert.notEqual(conflict.status, 0);
     assert.match(conflict.stderr, /Refusing to overwrite/);
+    // The old message pointed at --force, which is what the next error used to
+    // tell you to do. The conflict has to name the command that upgrades.
+    assert.match(conflict.stderr, /pi-minimal-harness update/);
     assert.equal(await fs.readFile(extension, "utf8"), "local change\n");
 
     const forced = runInstaller(["init", "--project", project, "--force"]);
     assert.equal(forced.status, 0, forced.stderr);
     assert.notEqual(await fs.readFile(extension, "utf8"), "local change\n");
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("a contract pasted without installer markers is recognised by content", async () => {
+  const project = await tempProject();
+  try {
+    assert.equal(runInstaller(["init", "--project", project]).status, 0);
+    const agents = path.join(project, "AGENTS.md");
+    // The documented adoption path pastes the section and never writes markers.
+    const marked = await fs.readFile(agents, "utf8");
+    const pasted = marked.replace(/<!-- BEGIN pi-minimal-harness -->\n|<!-- END pi-minimal-harness -->\n/g, "");
+    await fs.writeFile(agents, pasted, "utf8");
+
+    for (const args of [["update"], ["init", "--force"]]) {
+      const result = runInstaller([...args, "--project", project]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /AGENTS\.md \(harness contract already present, pasted without installer markers\)/);
+      assert.equal(await fs.readFile(agents, "utf8"), pasted);
+    }
+
+    // A project rule after the section is the point of pasting, not a conflict.
+    const withRule = `${pasted}\n- a rule of this project\n`;
+    await fs.writeFile(agents, withRule, "utf8");
+    const kept = runInstaller(["update", "--project", project]);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.equal(await fs.readFile(agents, "utf8"), withRule);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("a hand-edited contract is refused and left untouched", async () => {
+  const project = await tempProject();
+  try {
+    assert.equal(runInstaller(["init", "--project", project]).status, 0);
+    const agents = path.join(project, "AGENTS.md");
+    const pasted = (await fs.readFile(agents, "utf8")).replace(
+      /<!-- BEGIN pi-minimal-harness -->\n|<!-- END pi-minimal-harness -->\n/g,
+      "",
+    );
+    const edited = pasted.replace(
+      "- Work is executed through the `pi-minimal-harness` pipeline.",
+      "- Work is executed the way this project prefers.",
+    );
+    await fs.writeFile(agents, edited, "utf8");
+
+    for (const args of [["update"], ["init", "--force"]]) {
+      const result = runInstaller([...args, "--project", project]);
+      assert.notEqual(result.status, 0, `${args.join(" ")} should refuse`);
+      assert.match(result.stderr, /differs from this release/);
+      assert.equal(await fs.readFile(agents, "utf8"), edited);
+    }
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("init on an installed project names update as the upgrade command", async () => {
+  const project = await tempProject();
+  try {
+    assert.equal(runInstaller(["init", "--project", project]).status, 0);
+    const config = path.join(project, "harness.config.yaml");
+    await fs.writeFile(config, LOCAL_CONFIG, "utf8");
+
+    const result = runInstaller(["init", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /note .*already here: this is an install, not an upgrade/);
+    assert.match(result.stdout, /pi-minimal-harness update/);
+    // Still additive: the local values are intact, which is why this is a note.
+    assert.match(await fs.readFile(config, "utf8"), /^ {2}workflow_mode: full$/m);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("a fresh install reports the template placeholders it shipped", async () => {
+  const project = await tempProject();
+  try {
+    const result = runInstaller(["init", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /warning 5 agent\(s\) still use the template model placeholder/);
+    assert.match(result.stdout, /warning project: is still the template placeholder/);
+
+    // Once the models are real the warning goes away, and dry-run shows it too.
+    const config = path.join(project, "harness.config.yaml");
+    await fs.writeFile(
+      config,
+      (await fs.readFile(config, "utf8")).replace(/model: provider\/model-id/g, "model: opencode-go/gpt-5.1").replace("project: my-project", "project: my-app"),
+      "utf8",
+    );
+    const after = runInstaller(["update", "--project", project, "--dry-run"]);
+    assert.equal(after.status, 0, after.stderr);
+    assert.doesNotMatch(after.stdout, /template model placeholder/);
+    assert.doesNotMatch(after.stdout, /template placeholder/);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }

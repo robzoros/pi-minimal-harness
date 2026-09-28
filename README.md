@@ -99,12 +99,36 @@ Install this harness into an existing project with:
 npx pi-minimal-harness init
 ```
 
-The two commands have different effects:
+The commands differ in effect:
 
 | Command | Effect |
 |---|---|
-| `npx pi-minimal-harness init` | **Installs** the extension, prompts, delivery skill, `harness.config.yaml`, and the generic `AGENTS.md` contract. |
-| `npx pi-minimal-harness init --project /path/to/project --dry-run` | **Only previews** the changes; it writes no files. |
+| `npx pi-minimal-harness init` | **Installs** the extension, prompts, delivery skill, `harness.config.yaml`, and the `AGENTS.md` contract. |
+| `npx pi-minimal-harness init --dry-run` | **Only previews** the changes; it writes no files. |
+| `npx pi-minimal-harness update` | **Upgrades** an installation: refreshes what Pi runs and only adds missing config keys. |
+
+`init` is for a project that does not have the harness yet. Running it on one
+that does still works — it is idempotent and additive — but it is not an
+upgrade, so the report says so and names `update`. The only two situations that
+make an installer command stop are worth knowing:
+
+- a **conflict** in a file the harness owns: refused, with `--force` or
+  `update` named in the message;
+- an `AGENTS.md` whose `## Harness workflow` section has been **edited by
+  hand**: refused, and the file is left byte-for-byte untouched, `--force`
+  included. A contract that is present but unmodified — pasted without the
+  installer markers, which is the documented adoption path — is recognised as
+  present and never rewritten.
+
+A fresh install ships the template's placeholders, and the report says so
+loudly rather than leaving it in a "Next steps" line nobody reads:
+
+```text
+  warning 5 agent(s) still use the template model placeholder (model: provider/model-id)
+  warning project: is still the template placeholder (project: my-project)
+```
+
+`/harness-config` fails until the models come from Pi's `/models` output.
 
 The installer is idempotent: running it again does not duplicate the contract
 or rewrite identical files. It refuses to overwrite conflicting files unless
