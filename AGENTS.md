@@ -61,8 +61,10 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   with an error without one. Agents without the field are assumed to mutate
   files, so validation lists them.
 - Memory is provided by the user-level `gentle-engram` Pi package together with
-  `pi-mcp-adapter` (`~/.pi/agent/mcp.json` — `%USERPROFILE%\.pi\agent\mcp.json`
-  on Windows — `engram mcp --tools=agent`): it owns
+  `pi-mcp-adapter` (`~/.pi/agent/mcp-adapter.json`, or
+  `%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows — that is the adapter's
+  own config; the legacy `mcp.json` beside it is Pi's —
+  `engram mcp --tools=agent`): it owns
   session registration, passive capture, the `mem_*` tools, the injected Memory
   Protocol, compaction recovery and `<private>` redaction. The harness neither
   gates nor duplicates it; project detection comes from the server's

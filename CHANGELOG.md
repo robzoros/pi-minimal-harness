@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Engram setup instructions told the reader to run `pi-engram init` as a
+  bare command. It is never on the `PATH`: `pi install` keeps package shims in
+  npm's private `node_modules/.bin`, which npm only exposes to scripts run
+  inside that package. The README now shows the three invocations that work
+  (bash, PowerShell and plain `node cli.js`), explains why the shim is not on
+  the `PATH`, warns against `npx pi-engram` (the package is `gentle-engram`;
+  the binary is only its name), and points at `ENGRAM_BIN` when the Engram
+  binary itself is not on the `PATH`.
+- The documentation named `~/.pi/agent/mcp.json` as the file where the
+  `pi-mcp-adapter` integration registers its servers. That is the legacy file,
+  and its `mcpServers` may be owned by Pi's built-in MCP; the adapter's own
+  config is `~/.pi/agent/mcp-adapter.json`
+  (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows). `README.md`,
+  `AGENTS.md` and `AGENTS-addition.md` now point at the adapter file, and the
+  README explains that a `pi-engram init` that landed the Engram entry in the
+  legacy file has to be moved across.
 - The smoke test only ran on Posix hosts: it built its temporary project under
   the hardcoded `/tmp` (absent on Windows) and imported the extension through a
   hand-built `file://` string. It now uses `os.tmpdir()` and `pathToFileURL`,
@@ -32,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `npx pi-minimal-harness update`: one command that upgrades an existing
+  installation. It replaces the upstream-owned files (extension, prompts,
+  delivery skill, `AGENTS.md` contract block) and merges the local
+  `harness.config.yaml` **additively** — keys the newer template introduced are
+  added with their default value and the comment that documents them, while
+  every existing value, extra key and YAML sequence is left untouched and no
+  key is ever removed. The previous config is kept as `harness.config.yaml.bak`
+  (Git-excluded) whenever something is added, `--dry-run` lists every addition
+  without writing, and the local file's indentation width and line endings are
+  preserved. `init` uses the same merge, so it can no longer be blocked by an
+  edited config.
 - Control tools `harness_decision` and `harness_report`: the pipeline's
   decision and per-step report are now recorded by a tool call instead of being
   parsed out of the reply. The `HARNESS-DECISION` and `HARNESS-DONE` markers stay
@@ -51,13 +78,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Agents without the field are assumed to mutate files, and `/harness-config`
   validation lists them.
 - A dependency-free `pi-minimal-harness init` installer with dry-run, force,
-  idempotent contract merging, and local Git exclusion for the generated config.
+  idempotent contract merging, and local Git exclusion for the generated config
+  and its `update` backup.
 - Model-aware reasoning-effort selection in `/harness-model`: after choosing a
   model from Pi's catalog, the operator chooses from the effort levels exposed
   by that model. Model and effort are persisted atomically in the agent block.
 
 ### Changed
 
+- `README.md` now documents the full CodeGraph setup — `npm i -g codegraph`,
+  `codegraph init` in the project, and the `codegraph` entry to add under
+  `mcpServers` in `~/.pi/agent/mcp-adapter.json` (`serve --mcp`, `directTools:
+  false`, `lifecycle: "lazy"`) — and the upgrade command shows the common case
+  (`cd` into the project, then `npx --yes pi-minimal-harness@latest update`)
+  alongside `--project`, with `/reload` and `/harness-config` as the follow-up.
 - A turn whose assistant message still carries a pending tool call no longer
   satisfies the auto-harness turn wait, so a step that uses a tool is no longer
   read as finished between the tool call and its follow-up.

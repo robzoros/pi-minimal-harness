@@ -42,7 +42,8 @@ workflow you can actually audit.
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
 | Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
-| Tests | `node tests/harness.test.mjs` (139 checks) and `node tests/install.test.mjs` (3 installer tests) |
+| Upgrade | `npx pi-minimal-harness update` refreshes upstream files and **only adds** missing keys to your config |
+| Tests | `node tests/harness.test.mjs` (139 checks) and `node tests/install.test.mjs` (8 installer tests) |
 
 ## Install in your Pi project
 
@@ -103,7 +104,9 @@ The two commands have different effects:
 
 The installer is idempotent: running it again does not duplicate the contract
 or rewrite identical files. It refuses to overwrite conflicting files unless
-`--force` is supplied.
+`--force` is supplied. Your `harness.config.yaml` is never overwritten: it is
+created from `harness.config.example.yaml` when missing and otherwise merged
+additively, so a new upstream key is added and your values are kept.
 
 The generated `harness.config.yaml` is treated as local configuration. When the
 project is inside a Git repository, the installer adds it to the repository's
@@ -127,28 +130,120 @@ npx pi-minimal-harness init --help
 After installation, configure models in `harness.config.yaml`, run `/reload`,
 and validate with `/harness-config`.
 
+## Upgrade an existing installation
+
+```bash
+cd /path/to/project
+npx --yes pi-minimal-harness@latest update
+```
+
+Pass `--project /path/to/project` to update a project without changing
+directory; without it `update` works on the current directory.
+
+`update` replaces everything Pi executes — the extension, the prompts, the
+delivery skill and the `AGENTS.md` contract block — and **only adds** the keys
+a newer release introduced to your `harness.config.yaml`. It never overwrites a
+value you set, never removes a key and never rewrites a YAML sequence. The
+guarantee in one line: *update replaces what Pi runs and only adds keys to your
+configuration*.
+
+```text
+  add defaults.preflight_policy in harness.config.yaml
+  added 1 key(s) to harness.config.yaml (existing values untouched)
+  backup harness.config.yaml.bak
+```
+
+Preview it first with `update --dry-run`, which lists every addition and writes
+nothing. When at least one key is added, the previous config is kept as
+`harness.config.yaml.bak` (excluded from Git together with the config); when
+nothing is missing, no backup is written. The new keys arrive with the
+template's default values, so run `/reload` in Pi to load the updated extension
+and prompts, then `/harness-config` to review and validate the configuration.
+`update` needs no flags: it always refreshes upstream-owned files.
+
 **Optional integrations** (both recommended, both independent of the harness):
 
-- **Engram**: install the Engram binary on your `PATH`, then let its Pi helper
-  configure the integration:
+- **Engram**: install the Engram binary, then let its Pi helper configure the
+  integration:
 
   ```bash
   pi install npm:gentle-engram
   pi install npm:pi-mcp-adapter
-  pi-engram init
   ```
 
-  Restart Pi (or run `/reload`) afterward. `pi-engram init` writes the package
-  declarations to Pi's `settings.json` and the Engram MCP server to
-  `~/.pi/agent/mcp.json` (`%USERPROFILE%\.pi\agent\mcp.json` on Windows),
-  including `engram mcp --tools=agent`; it also keeps
-  MCP tools from duplicating Pi's native `mem_*` tools. The Engram binary itself
-  must be installed separately. Normally you do not need to run `engram serve`:
-  Engram starts it on demand. Use `pi-engram init --force` only to replace an
+  The helper `pi-engram` is **not on your `PATH`**: `pi install` puts it in
+  npm's private `node_modules/.bin`, which npm only adds to `PATH` for scripts
+  run inside that package, so the shims of Pi packages never reach the system
+  `PATH`. Call it by path:
+
+  ```bash
+  # Git Bash, macOS or Linux
+  ~/.pi/agent/npm/node_modules/.bin/pi-engram init
+
+  # PowerShell on Windows
+  & "$env:USERPROFILE\.pi\agent\npm\node_modules\.bin\pi-engram.cmd" init
+
+  # equivalent, without the shim
+  node "$HOME/.pi/agent/npm/node_modules/gentle-engram/cli.js" init
+  ```
+
+  Do not reach for `npx pi-engram`: the package is `gentle-engram` and
+  `pi-engram` is only its binary name, so `npx` would look for a package of that
+  name in the registry. If you prefer the bare command, add
+  `~/.pi/agent/npm/node_modules/.bin` to your `PATH`; the paths above keep
+  working even if that directory moves.
+
+  Restart Pi (or run `/reload`) afterward. The helper writes the package
+  declarations to Pi's `settings.json` and the Engram MCP server to the agent
+  directory, including `engram mcp --tools=agent`; it also keeps
+  MCP tools from duplicating Pi's native `mem_*` tools. The Engram binary
+  itself must be installed separately; when it is not on your `PATH`, set
+  `ENGRAM_BIN` to its absolute path instead. Normally you do not need to run
+  `engram serve`: Engram starts it on demand. Use `--force` to replace an
   existing Engram MCP entry. See [`AGENTS-addition.md`](AGENTS-addition.md) for
   the memory protocol.
-- **CodeGraph**: `npm i -g codegraph`, then `codegraph init --cwd <repo root>`
-  in the project.
+
+  The adapter reads its own `~/.pi/agent/mcp-adapter.json`
+  (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows). Helper versions that
+  still write the legacy `mcp.json` next to it put the entry in a file whose
+  `mcpServers` may be owned by Pi's built-in MCP; if the helper put it there,
+  move that entry to `mcp-adapter.json` (same shape as the CodeGraph example
+  below).
+- **CodeGraph**: install the CLI, then index the repository:
+
+  ```bash
+  npm i -g codegraph
+  cd /path/to/project && codegraph init
+  ```
+
+  `codegraph init` indexes the current repository; `codegraph init --cwd <repo
+  root>` does the same for an explicit root. The index lives in `.codegraph/` at
+  the repository root and must not be committed.
+
+  Then register the server in the MCP adapter's own config file,
+  `~/.pi/agent/mcp-adapter.json` (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on
+  Windows) — that is the adapter's file, **not** `mcp.json` — adding the entry
+  under `mcpServers`:
+
+  ```json
+  {
+    "mcpServers": {
+      "codegraph": {
+        "command": "codegraph",
+        "args": ["serve", "--mcp"],
+        "directTools": false,
+        "lifecycle": "lazy"
+      }
+    }
+  }
+  ```
+
+  `directTools: false` keeps the tools behind the adapter's namespace instead of
+  exposing them directly, the same as Engram, and `lifecycle: "lazy"` starts the
+  server on first use (the other accepted values are `eager`, `keep-alive` and
+  `lazy-keep-alive`). Run `/reload` after editing the file to connect. CodeGraph
+  is the tool the `explorer` agent uses, so it is only worth configuring when
+  structural exploration is part of your workflow.
 
 ## Configuration reference
 

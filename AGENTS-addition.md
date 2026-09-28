@@ -55,8 +55,10 @@ Two ways to adopt it:
 ## Memory — Engram
 
 Recommended packages (user-level): `gentle-engram` plus `pi-mcp-adapter`, with
-`engram mcp --tools=agent` registered in `~/.pi/agent/mcp.json`. Memory is
-local-first (SQLite + FTS5) and shared across sessions and agents.
+`engram mcp --tools=agent` registered in the adapter's own
+`~/.pi/agent/mcp-adapter.json` (not the legacy `mcp.json`, whose `mcpServers`
+may belong to Pi). Memory is local-first (SQLite + FTS5) and shared across
+sessions and agents.
 
 - **Save** durable learnings right after: bugfix, architecture/design
   decision, non-obvious discovery, configuration/setup, established pattern, or
