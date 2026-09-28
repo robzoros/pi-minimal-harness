@@ -27,7 +27,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile, spawn } from "node:child_process";
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, readFileSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -364,6 +364,80 @@ export function getDefaultString(lines: string[], key: string, fallback: string)
 /** Master gate for the harness-dispatch tool. */
 export function isAllowDispatch(lines: string[]): boolean {
   return getDefaultFlag(lines, "allow_dispatch", true);
+}
+
+// ---------------------------------------------------------------------------
+// Contract resolution for dispatched subagents
+// ---------------------------------------------------------------------------
+// The contract injected into a dispatch subagent is the only channel it gets,
+// so failing to find it must not be the price of a wrong guess. An adopting
+// project reaches it in one of two ways: it pastes the block into its
+// `AGENTS.md` (the installer does exactly that) or it keeps a separate file
+// and points at it. The pipeline steps do not depend on any of this: they get
+// the project's `AGENTS.md` through Pi's normal mechanism.
+//
+// Resolution is therefore a chain verified by existence, never "the first
+// configured one wins": a `defaults.subagent_context_file` that points at a
+// file no longer present — the normal state after a project pasted the block
+// and deleted the standalone file — falls through instead of breaking dispatch.
+const HARNESS_BLOCK_START = "<!-- BEGIN pi-minimal-harness -->";
+
+export interface ContractResolution {
+  /** Absolute path of the file to inject, or null when none exists. */
+  path: string | null;
+  /** Absolute paths that were considered, in order. */
+  candidates: string[];
+  /** Which step matched: "defaults.subagent_context_file", "AGENTS.md" or "AGENTS-addition.md". */
+  source: string | null;
+  /** A configured value that exists nowhere, worth warning about. */
+  staleConfig: string | null;
+}
+
+function contractCandidates(cwd: string, configPath: string | undefined, lines: string[]): Array<{ source: string; file: string }> {
+  const base = cwd ?? (configPath ? path.dirname(configPath) : process.cwd());
+  const candidates: Array<{ source: string; file: string }> = [];
+  const configured = getDefaultString(lines, "subagent_context_file", "");
+  if (configured) candidates.push({ source: "defaults.subagent_context_file", file: configured });
+  candidates.push({ source: "AGENTS.md", file: "AGENTS.md" });
+  candidates.push({ source: "AGENTS-addition.md", file: "AGENTS-addition.md" });
+  return candidates.map((candidate) => ({
+    source: candidate.source,
+    file: path.isAbsolute(candidate.file) ? candidate.file : path.join(base, candidate.file),
+  }));
+}
+
+/**
+ * Find the contract to inject into dispatched subagents: the configured file
+ * when it exists, then an `AGENTS.md` that carries the harness block, then a
+ * standalone `AGENTS-addition.md`. A configured file that exists nowhere is
+ * reported as stale instead of failing the resolution.
+ */
+export function resolveContractPath(lines: string[], configPath?: string, cwd?: string): ContractResolution {
+  const considered = contractCandidates(cwd, configPath, lines);
+  const configured = considered.find((candidate) => candidate.source === "defaults.subagent_context_file");
+  const resolution: ContractResolution = {
+    path: null,
+    candidates: considered.map((c) => c.file),
+    source: null,
+    staleConfig: configured && !existsSync(configured.file) ? configured.file : null,
+  };
+  for (const candidate of considered) {
+    if (!existsSync(candidate.file)) continue;
+    if (candidate.source === "AGENTS.md") {
+      // A bare AGENTS.md is only a contract when the installer wrote the block.
+      let text = "";
+      try {
+        text = readFileSync(candidate.file, "utf8");
+      } catch {
+        continue;
+      }
+      if (!text.includes(HARNESS_BLOCK_START)) continue;
+    }
+    resolution.path = candidate.file;
+    resolution.source = candidate.source;
+    return resolution;
+  }
+  return resolution;
 }
 
 /**
@@ -1362,12 +1436,14 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
 export function summarize(lines: string[], configPath: string, cwd: string): string {
   const rel = path.relative(cwd, configPath) || configPath;
   const mode = getWorkflowMode(lines) ?? "(missing)";
+  const contract = resolveContractPath(lines, configPath, cwd);
+  const contractText = contract.path ?? "(none found; checked " + contractCandidates(cwd, configPath, lines).map((c) => path.relative(cwd, c.file) || c.file).join(", ") + ")";
   const out: string[] = [
     `Harness config: ${rel}`,
     `defaults.workflow_mode: ${mode}`,
     `defaults.auto_harness: ${isAutoHarness(lines) ? "true" : "false"}`,
     `defaults.question_short_circuit: ${isQuestionShortCircuit(lines) ? "true" : "false"}`,
-    `defaults.allow_dispatch: ${isAllowDispatch(lines) ? "true" : "false"} (context: ${getDefaultString(lines, "subagent_context_file", "AGENTS-addition.md")})`,
+    `defaults.allow_dispatch: ${isAllowDispatch(lines) ? "true" : "false"} (context: ${contractText})`,
     `defaults.strict_decision_marker: ${isStrictDecisionMarker(lines) ? "true" : "false"}`,
     `defaults.preflight_policy: ${preflightPolicy(lines)}`,
     "agents:",
@@ -1473,21 +1549,23 @@ export async function validate(
   }
 
   if (configPath && isAllowDispatch(lines)) {
-    const contextFile = getDefaultString(lines, "subagent_context_file", "AGENTS-addition.md");
+    const contract = resolveContractPath(lines, configPath, cwd);
     const base = cwd ?? path.dirname(configPath);
-    const resolved = path.isAbsolute(contextFile) ? contextFile : path.join(base, contextFile);
-    let contextExists = false;
-    try {
-      await fs.access(resolved);
-      contextExists = true;
-    } catch {
-      contextExists = false;
-    }
+    const detail = contract.path
+      ? path.relative(base, contract.path) || contract.path
+      : contract.candidates.map((candidate) => path.relative(base, candidate) || candidate).join(" | ");
     checks.push({
-      label: "subagent_context_file exists when allow_dispatch is enabled",
-      ok: contextExists,
-      detail: contextFile,
+      label: "contract file for dispatched subagents exists",
+      ok: contract.path !== null,
+      detail,
     });
+    if (contract.staleConfig) {
+      checks.push({
+        label: "defaults.subagent_context_file points at an existing file",
+        ok: false,
+        detail: `${contract.staleConfig} (not found; fell back to ${contract.source})`,
+      });
+    }
   }
 
   const deliveryBlock = agentBlock(lines, "delivery");
@@ -1973,9 +2051,15 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         return fail(`Provide between 1 and ${DISPATCH_MAX_TASKS} tasks.`);
       }
 
-      const contextFile = getDefaultString(lines, "subagent_context_file", "AGENTS-addition.md");
-      const contractPath = path.isAbsolute(contextFile) ? contextFile : path.join(ctx.cwd, contextFile);
-      if (!existsSync(contractPath)) return fail(`subagent_context_file not found: ${contextFile}`);
+      const contract = resolveContractPath(lines, configPath, ctx.cwd);
+      if (!contract.path) {
+        const tried = contract.candidates.map((candidate) => path.relative(ctx.cwd, candidate) || candidate).join(", ");
+        return fail(
+          `No contract file found for dispatched subagents (checked: ${tried}). ` +
+            `Run 'npx pi-minimal-harness update' in this project, or set defaults.subagent_context_file to a file that exists.`,
+        );
+      }
+      const contractPath = contract.path;
 
       interface Prepared {
         agent: string;

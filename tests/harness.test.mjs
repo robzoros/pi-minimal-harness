@@ -257,8 +257,73 @@ check(
 check("isQuestionShortCircuit default true", mod.isQuestionShortCircuit(lines.filter((l) => !l.startsWith("  question_short_circuit:"))) === true);
 check("isQuestionShortCircuit false when set", mod.isQuestionShortCircuit(lines.map((l) => (l.startsWith("  question_short_circuit:") ? "  question_short_circuit: false" : l))) === false);
 check("isAllowDispatch true", mod.isAllowDispatch(lines) === true);
-check("getDefaultString reads subagent_context_file", mod.getDefaultString(lines, "subagent_context_file", "fallback") === "AGENTS-addition.md");
+check("getDefaultString reads a configured key", mod.getDefaultString(lines, "workflow_mode", "fallback") === "simple");
 check("getDefaultString fallback", mod.getDefaultString(lines, "no_such_key", "fallback") === "fallback");
+
+// --- contract resolution for dispatched subagents -----------------------------
+// The installer pastes the contract into the project's AGENTS.md, so a project
+// that keeps no standalone file must still be able to dispatch. A configured
+// key that points at a deleted file is the state every such project is left in
+// after an update, and it must fall through instead of failing.
+const contractRoot = await fs.mkdtemp(path.join(os.tmpdir(), "harness-contract-"));
+const contractCfg = path.join(contractRoot, "harness.config.yaml");
+const BASE_LINES = ["defaults:", "  allow_dispatch: true", ""];
+const WITH_STALE_KEY = [...BASE_LINES.slice(0, 1), "  subagent_context_file: AGENTS-addition.md", ...BASE_LINES.slice(1)];
+const WITH_LIVE_KEY = [...BASE_LINES.slice(0, 1), "  subagent_context_file: contracts/harness.md", ...BASE_LINES.slice(1)];
+const MARKED_AGENTS = ["# Project", "", "<!-- BEGIN pi-minimal-harness -->", "## Harness workflow", "<!-- END pi-minimal-harness -->", ""].join("\n");
+const BARE_AGENTS = ["# Project", "", "Nothing harness-specific here.", ""].join("\n");
+
+await fs.writeFile(path.join(contractRoot, "AGENTS-addition.md"), "contract\n", "utf8");
+const onlyStandalone = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
+check(
+  "contract: a standalone AGENTS-addition.md resolves",
+  onlyStandalone.path === path.join(contractRoot, "AGENTS-addition.md") && onlyStandalone.source === "AGENTS-addition.md",
+);
+check("contract: no key configured means no stale config", onlyStandalone.staleConfig === null);
+
+await fs.writeFile(path.join(contractRoot, "AGENTS.md"), MARKED_AGENTS, "utf8");
+const pastedOnly = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
+check(
+  "contract: an AGENTS.md carrying the harness block resolves",
+  pastedOnly.path === path.join(contractRoot, "AGENTS.md") && pastedOnly.source === "AGENTS.md",
+);
+
+await fs.rm(path.join(contractRoot, "AGENTS-addition.md"));
+const staleOnly = mod.resolveContractPath(WITH_STALE_KEY, contractCfg, contractRoot);
+check(
+  "contract: a configured key that no longer exists falls back to AGENTS.md",
+  staleOnly.path === path.join(contractRoot, "AGENTS.md") &&
+    staleOnly.staleConfig === path.join(contractRoot, "AGENTS-addition.md"),
+);
+
+await fs.writeFile(path.join(contractRoot, "AGENTS.md"), BARE_AGENTS, "utf8");
+const bareOnly = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
+check("contract: an AGENTS.md without the harness block is not a contract", bareOnly.path === null);
+check(
+  "contract: every candidate is reported when nothing resolves",
+  bareOnly.candidates.length === 2 && bareOnly.candidates[0].endsWith("AGENTS.md"),
+);
+const staleAndBare = mod.resolveContractPath(WITH_STALE_KEY, contractCfg, contractRoot);
+check("contract: a stale key with nothing else is unresolved, not fatal", staleAndBare.path === null && !!staleAndBare.staleConfig);
+check(
+  "contract: nothing configured and nothing present is unresolved",
+  mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot).path === null,
+);
+
+await fs.mkdir(path.join(contractRoot, "contracts"), { recursive: true });
+await fs.writeFile(path.join(contractRoot, "contracts", "harness.md"), "contract\n", "utf8");
+const liveKey = mod.resolveContractPath(WITH_LIVE_KEY, contractCfg, contractRoot);
+check(
+  "contract: a configured file that exists wins",
+  liveKey.path === path.join(contractRoot, "contracts", "harness.md") && liveKey.source === "defaults.subagent_context_file",
+);
+await fs.writeFile(path.join(contractRoot, "AGENTS.md"), MARKED_AGENTS, "utf8");
+check(
+  "contract: the configured file is preferred over AGENTS.md",
+  mod.resolveContractPath(WITH_LIVE_KEY, contractCfg, contractRoot).path === liveKey.path &&
+    mod.resolveContractPath(WITH_LIVE_KEY, contractCfg, contractRoot).staleConfig === null,
+);
+await fs.rm(contractRoot, { recursive: true, force: true });
 check(
   "findModelRef exact + bare",
   mod.findModelRef("opencode-go/gpt-5.1", { getAvailable: () => models, getAll: () => [] })?.id === "gpt-5.1" &&
@@ -401,11 +466,30 @@ check(
   "validate rejects reasoning unsupported by configured model",
   invalidEffortChecks.some((c) => c.label === 'agent "implementer" reasoning is supported by its model' && !c.ok),
 );
-check("validate includes context-file check (present)", checks.some((c) => c.label.includes("subagent_context_file") && c.ok));
+check("validate includes the contract-file check (present)", checks.some((c) => c.label === "contract file for dispatched subagents exists" && c.ok));
 await fs.rm(path.join(tmp, "AGENTS-addition.md"));
 const checksMissing = await mod.validate(lines, cfgPath, tmp);
-const missingCheck = checksMissing.find((c) => c.label.includes("subagent_context_file"));
-check("validate: context-file missing -> fail", !!missingCheck && missingCheck.ok === false);
+const missingCheck = checksMissing.find((c) => c.label === "contract file for dispatched subagents exists");
+check("validate: contract file missing -> fail", !!missingCheck && missingCheck.ok === false);
+check(
+  "validate: the failure names every candidate it tried",
+  !!missingCheck && /AGENTS\.md/.test(missingCheck.detail ?? "") && /AGENTS-addition\.md/.test(missingCheck.detail ?? ""),
+);
+// The reported failure mode: the key still names a file that was deleted after
+// pasting, which must stay green through the AGENTS.md fallback.
+const staleLines = cfgText.split(/\r?\n/);
+staleLines.splice(staleLines.indexOf("defaults:") + 1, 0, "  subagent_context_file: AGENTS-addition.md");
+await fs.writeFile(path.join(tmp, "AGENTS.md"), MARKED_AGENTS, "utf8");
+const staleChecks = await mod.validate(staleLines, cfgPath, tmp);
+check(
+  "validate: a stale subagent_context_file does not turn the contract check red",
+  staleChecks.some((c) => c.label === "contract file for dispatched subagents exists" && c.ok),
+);
+check(
+  "validate: a stale subagent_context_file is reported on its own check",
+  staleChecks.some((c) => c.label === "defaults.subagent_context_file points at an existing file" && !c.ok),
+);
+await fs.rm(path.join(tmp, "AGENTS.md"));
 await fs.copyFile(path.join(ROOT, "AGENTS-addition.md"), path.join(tmp, "AGENTS-addition.md"));
 
 // --- model + effort command ---------------------------------------------------

@@ -46,6 +46,8 @@ test("init --dry-run reports changes without writing", async () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Dry run/);
     assert.equal(await fs.access(path.join(project, ".pi", "extensions", "harness.ts")).then(() => true, () => false), false);
+    assert.match(result.stdout, /create CHANGELOG\.md/);
+    assert.equal(await exists(path.join(project, "CHANGELOG.md")), false);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
@@ -94,6 +96,37 @@ test("init refuses conflicts unless --force is supplied", async () => {
     const forced = runInstaller(["init", "--project", project, "--force"]);
     assert.equal(forced.status, 0, forced.stderr);
     assert.notEqual(await fs.readFile(extension, "utf8"), "local change\n");
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("init writes only the contract section, and creates a changelog when missing", async () => {
+  const project = await tempProject();
+  try {
+    const result = runInstaller(["init", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+
+    const agents = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
+    // The preamble is documentation for whoever reads AGENTS-addition.md, not
+    // part of what an agent should receive.
+    assert.doesNotMatch(agents, /Two ways to adopt/);
+    assert.doesNotMatch(agents, /^# AGENTS-addition\.md/m);
+    assert.match(agents, /^## Harness workflow$/m);
+    assert.equal((agents.match(/BEGIN pi-minimal-harness/g) ?? []).length, 1);
+    assert.equal((agents.match(/END pi-minimal-harness/g) ?? []).length, 1);
+
+    const changelog = await fs.readFile(path.join(project, "CHANGELOG.md"), "utf8");
+    assert.match(changelog, /^# Changelog$/m);
+    assert.match(result.stdout, /create CHANGELOG\.md/);
+
+    // An existing changelog belongs to the project and is never rewritten.
+    const own = "# Changelog\n\n- our own history\n";
+    await fs.writeFile(path.join(project, "CHANGELOG.md"), own, "utf8");
+    const again = runInstaller(["init", "--project", project]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /unchanged CHANGELOG\.md/);
+    assert.equal(await fs.readFile(path.join(project, "CHANGELOG.md"), "utf8"), own);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }

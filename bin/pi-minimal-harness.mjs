@@ -331,10 +331,28 @@ async function mergeLocalConfig(source, destination, options, report) {
   await fs.writeFile(destination, lines.join(eol), "utf8");
 }
 
-async function appendHarnessContract(project, options, report) {
+/**
+ * The contract an adopting project receives: AGENTS-addition.md from the
+ * "## Harness workflow" heading onward. Everything above that heading is
+ * documentation for whoever reads the source file (the two adoption options,
+ * how to re-sync it) and must not be injected into the project's AGENTS.md.
+ */
+async function harnessContractText() {
   const source = path.join(PACKAGE_ROOT, "AGENTS-addition.md");
+  const text = (await fs.readFile(source, "utf8")).trim();
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^## Harness workflow\s*$/.test(line));
+  if (start === -1) {
+    throw new Error(
+      `AGENTS-addition.md has no "## Harness workflow" section; refusing to guess what the contract is.`,
+    );
+  }
+  return lines.slice(start).join("\n").trim();
+}
+
+async function appendHarnessContract(project, options, report) {
   const destination = path.join(project, "AGENTS.md");
-  const contract = (await fs.readFile(source, "utf8")).trim();
+  const contract = await harnessContractText();
   const block = `${HARNESS_BLOCK_START}\n${contract}\n${HARNESS_BLOCK_END}\n`;
   let current = "";
   if (await pathExists(destination)) current = await fs.readFile(destination, "utf8");
@@ -405,6 +423,25 @@ async function addLocalConfigExclude(project, options, report) {
   }
 }
 
+/**
+ * The contract tells every agent to record its work in a changelog, so an
+ * adopting project needs one. Only a missing file is created: an existing
+ * changelog belongs to the project and is never touched, and the new one holds
+ * the heading and nothing else — no invented history.
+ */
+async function ensureChangelog(project, options, report) {
+  const destination = path.join(project, "CHANGELOG.md");
+  const relative = path.relative(project, destination) || destination;
+  if (await pathExists(destination)) {
+    report.push(`unchanged ${relative} (project changelog kept)`);
+    return;
+  }
+  report.push(`create ${relative} (empty: the project has no changelog yet)`);
+  if (options.dryRun) return;
+  const heading = ["# Changelog", "", "All notable changes to this project are documented in this file.", ""].join("\n");
+  await fs.writeFile(destination, heading, "utf8");
+}
+
 async function install(options) {
   const report = [];
   await fs.mkdir(options.project, { recursive: true });
@@ -428,6 +465,7 @@ async function install(options) {
     report,
   );
   await appendHarnessContract(options.project, options, report);
+  await ensureChangelog(options.project, options, report);
   await addLocalConfigExclude(options.project, options, report);
 
   const header = options.dryRun

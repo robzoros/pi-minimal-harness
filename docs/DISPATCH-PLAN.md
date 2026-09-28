@@ -78,13 +78,31 @@ New keys in `harness.config.yaml` `defaults:`, with safe defaults:
 | Key | Default | Purpose |
 |---|---|---|
 | `allow_dispatch` | to decide (see §10) | master gate for the tool |
-| `subagent_context_file` | `AGENTS-addition.md` | stable contract injected into each subagent |
+| `subagent_context_file` | unset | the contract injected into each subagent; optional, because it is resolved by existence |
+
+Contract resolution is a chain verified by existence, in this order:
+
+1. `defaults.subagent_context_file`, when it is set **and the file exists**;
+2. an `AGENTS.md` that carries the `<!-- BEGIN pi-minimal-harness -->` block —
+   which is what the installer writes, and therefore what every project that
+   pasted the contract has;
+3. a standalone `AGENTS-addition.md`.
+
+A configured value whose file no longer exists falls through to the next
+candidate instead of failing, because the additive config merge never removes
+the key from a project that already had it. `/harness-config` reports a
+`subagent_context_file` that resolves nowhere as its own check, separate from
+the contract check, so the fallback is visible rather than silent.
+
+The pipeline steps do not use this file: they receive the project's `AGENTS.md`
+through Pi's normal mechanism.
 
 Constants (documented, not configurable): max tasks 8, concurrency 4, output cap
 50 KB per task.
 
-`validate()` gains one check: when `allow_dispatch` is true, the
-`subagent_context_file` must exist.
+`validate()` gains two checks: when `allow_dispatch` is true, the resolved
+contract must exist, and a configured `subagent_context_file` that resolves
+nowhere is reported on its own.
 
 ## 6. Prompt changes (implementation step only)
 
@@ -137,7 +155,7 @@ Each milestone is independently testable and leaves the harness working.
    prompt guidance restricting it to orchestrator-style delegation.
    Per-agent tool mapping stays out of scope (the known `tools:` gap).
 3. Subagent system prompt: **the agent template rendered (`{{task}}` = brief
-   objective) plus `subagent_context_file`**; the full brief is the user message.
+   objective) plus the resolved contract**; the full brief is the user message.
 4. Document name: **kept `DISPATCH-PLAN.md`**.
 
 ## References
