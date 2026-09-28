@@ -18,6 +18,18 @@ Two ways to adopt it:
    `.pi/APPEND_SYSTEM.md` (project-level, added to Pi's system prompt; requires
    project trust).
 
+Only the section from `## Harness workflow` onward is the contract; everything
+above this line is for whoever reads this file, not for the agent.
+
+Dispatched subagents (the `harness-dispatch` tool) receive their contract from
+the first file that exists: `defaults.subagent_context_file` when it is set and
+resolves, then an `AGENTS.md` carrying the harness block, then a standalone
+`AGENTS-addition.md`. The pipeline steps do not depend on that file at all: they
+get the project's `AGENTS.md` through Pi's normal mechanism. Both variants above
+therefore work for dispatch — variant 1 by way of `AGENTS.md`, variant 2 by way
+of the standalone file — as long as the file named by a configured
+`subagent_context_file` is not deleted without updating the key.
+
 ---
 
 ## Harness workflow
@@ -77,8 +89,10 @@ sessions and agents.
 - Use CodeGraph **selectively**, only when relationships matter (callers,
   callees, impact, affected tests). For simple changes, read the source
   directly.
-- The index lives at the repository root: `.codegraph/` (its `.gitignore`
-  should be tracked; index data should not be committed).
+- The index lives at the repository root in `.codegraph/` and is **local
+  state**: never commit it. Whether any ignore file needs tracking is up to
+  the project's own rules — if the whole directory is already ignored, there
+  is nothing to add.
 - Useful commands: `codegraph init --cwd <root>`, `codegraph status`,
   `codegraph sync --cwd <root>`, `codegraph explore`, `codegraph callers`,
   `codegraph callees`, `codegraph impact`, `codegraph affected`.
@@ -101,7 +115,8 @@ Before considering a task complete:
   `description` frontmatter.
 - Skills are invoked automatically when the task matches their description, or
   explicitly with `/skill:<name>`.
-- This harness ships `github-delivery` (branch → commit → push → pull request
-  with the repository's conventions).
+- A skill the agent config declares must exist in this project: if a delivery
+  step lists a skill, verify `.agents/skills/<name>/SKILL.md` is present before
+  relying on it, and say so when it is not.
 - Create a new skill only for a recurring procedure that has safety or
   ordering constraints, or that encodes project-specific conventions.

@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dispatch was broken for the recommended way to adopt the contract. The
+  installer pastes the block into the project's `AGENTS.md`, so a project that
+  keeps no standalone `AGENTS-addition.md` had no contract to inject, and every
+  `harness-dispatch` call threw `subagent_context_file not found` — with
+  `allow_dispatch: true` and the agent's own instructions authorising the call —
+  while `/harness-config` showed the same failure in red. Neither adoption
+  option in `AGENTS-addition.md` mentioned it, because the two options are not
+  equivalent. The contract is now resolved by **existence**, in order:
+  `defaults.subagent_context_file` when it resolves, an `AGENTS.md` carrying the
+  `<!-- BEGIN pi-minimal-harness -->` block, then a standalone
+  `AGENTS-addition.md`. A configured key whose file was deleted falls through
+  instead of failing, which is the state every pasted-contract project is left
+  in after an update, since the additive config merge never removes the key. A
+  key that resolves nowhere is reported on its own `/harness-config` check so
+  the fallback is visible rather than silent.
+- The installer injected the whole of `AGENTS-addition.md` into the adopting
+  project's `AGENTS.md`, including the preamble that documents the two
+  adoption options and how to re-sync the file — documentation for whoever
+  reads the source file, addressed to the agent. The pasted block now starts at
+  `## Harness workflow`; a missing heading is a hard error rather than a
+  silent full-file paste.
+- The contract told agents to keep a tracked `.gitignore` inside `.codegraph/`,
+  which is unexecutable for a project whose ignore rules already cover the
+  directory, and promised that "this harness ships `github-delivery`" as a fact
+  about any adopting project. The index is now described as local state that
+  must not be committed, with the ignore file left to the project's own rules,
+  and a declared skill is something to verify rather than assume.
+
 - The Engram setup instructions told the reader to run `pi-engram init` as a
   bare command. It is never on the `PATH`: `pi install` keeps package shims in
   npm's private `node_modules/.bin`, which npm only exposes to scripts run
@@ -45,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throw, and a batch in which every agent failed throws with the per-agent
   summary in the message so the model still sees why. A partial batch still
   resolves normally and reports the failures in its text.
+
+### Changed
+
+- `defaults.subagent_context_file` is no longer part of the shipped
+  configuration: it is optional, because the contract is resolved by
+  existence. Existing projects keep the key and keep working, including the
+  projects whose key names a file they no longer have.
+- `init` and `update` create an empty `CHANGELOG.md` in the adopting project
+  when it has none — the contract asks every agent to record its work in a
+  changelog, and most projects have no file to write to. The new one holds the
+  Keep a Changelog heading and nothing else: no invented history, and an
+  existing changelog is never touched.
 
 ### Added
 

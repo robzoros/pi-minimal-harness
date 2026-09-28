@@ -48,8 +48,10 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   shown in the footer instead (`decision: …`). For questions the footer ends at
   `1/1 <agent>`; during step 1 the total is shown only once the decision is known.
 - The `harness-dispatch` tool runs independent tasks in isolated `pi`
-  subprocesses with a curated brief; gated by `defaults.allow_dispatch` and the
-  `defaults.subagent_context_file` contract (see `docs/DISPATCH-PLAN.md`).
+  subprocesses with a curated brief; gated by `defaults.allow_dispatch` and by
+  the subagent contract — `defaults.subagent_context_file` when it resolves, an
+  `AGENTS.md` carrying the harness block, or a standalone
+  `AGENTS-addition.md`, in that order (see `docs/DISPATCH-PLAN.md`).
 - The control tools `harness_decision` and `harness_report` record the pipeline's
   control flow. Their state is captured in their own `execute`, which runs after
   the `message_end` hook — so the tool must assign unconditionally and the hook

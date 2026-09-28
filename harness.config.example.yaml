@@ -5,7 +5,6 @@ defaults:
   auto_harness: true
   question_short_circuit: true
   allow_dispatch: true
-  subagent_context_file: AGENTS-addition.md
   allow_simple_mode: true
   # A missing or ambiguous decision marker stops the pipeline instead of being
   # read as "not ANSWER_ONLY", which would run the mutating steps of a task

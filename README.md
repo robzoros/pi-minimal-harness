@@ -78,8 +78,12 @@ your-project/
 1. Copy the files above.
 2. **Paste `AGENTS-addition.md` into your project's `AGENTS.md`** (or reference
    it / use `.pi/APPEND_SYSTEM.md` — the two options are explained at the top
-   of that file). Keep `subagent_context_file: AGENTS-addition.md` in the
-   config if you keep the file under that name.
+   of that file). Only the section from `## Harness workflow` onward belongs in
+   `AGENTS.md`; the preamble is for whoever reads the file. Dispatched
+   subagents get their contract from the first file that exists, in this order:
+   `defaults.subagent_context_file`, an `AGENTS.md` that carries the harness
+   block, then a standalone `AGENTS-addition.md`. Leave the key unset and every
+   variant works, including one that deletes the standalone file after pasting.
 3. Edit `harness.config.yaml`: set `project:`, pick models **from Pi's
    `/models` output** (never invent IDs), set each agent's supported reasoning
    effort, and set `defaults.workflow_mode`.
@@ -257,7 +261,10 @@ defaults:
   auto_harness: true             # plain requests run through the pipeline
   question_short_circuit: true   # orchestrator's ANSWER_ONLY stops the pipeline
   allow_dispatch: true           # enable the harness-dispatch tool
-  subagent_context_file: AGENTS-addition.md   # injected into dispatched subagents
+                                   # subagent contract: defaults.subagent_context_file
+                                   # if it exists, else an AGENTS.md carrying the
+                                   # harness block, else a standalone
+                                   # AGENTS-addition.md
   strict_decision_marker: true   # stop when the orchestrator emits no decision
   preflight_policy: advisory     # advisory | blocking (blocking gates file-mutating steps)
 workflows:
