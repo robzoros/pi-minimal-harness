@@ -66,7 +66,7 @@ cfgText = cfgText
   .replace(/(^ {2}delivery:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1low");
 await fs.writeFile(cfgPath, cfgText);
 await fs.cp(path.join(ROOT, "prompts"), path.join(tmp, "prompts"), { recursive: true });
-await fs.copyFile(path.join(ROOT, "AGENTS-addition.md"), path.join(tmp, "AGENTS-addition.md"));
+await fs.copyFile(path.join(ROOT, "pi-minimal-harness.md"), path.join(tmp, "pi-minimal-harness.md"));
 
 // --- fakes -------------------------------------------------------------------
 const events = {};
@@ -261,47 +261,67 @@ check("getDefaultString reads a configured key", mod.getDefaultString(lines, "wo
 check("getDefaultString fallback", mod.getDefaultString(lines, "no_such_key", "fallback") === "fallback");
 
 // --- contract resolution for dispatched subagents -----------------------------
-// The installer pastes the contract into the project's AGENTS.md, so a project
-// that keeps no standalone file must still be able to dispatch. A configured
-// key that points at a deleted file is the state every such project is left in
-// after an update, and it must fall through instead of failing.
+// The installer copies the contract to the project root as
+// `pi-minimal-harness.md` and only points at it from AGENTS.md, so that file is
+// the first candidate after a configured key. A project that pasted the
+// contract by hand, or that still carries the old file name, must still be able
+// to dispatch. A configured key that points at a deleted file is the state a
+// project is left in after replacing it, and it must fall through instead of
+// failing.
 const contractRoot = await fs.mkdtemp(path.join(os.tmpdir(), "harness-contract-"));
 const contractCfg = path.join(contractRoot, "harness.config.yaml");
 const BASE_LINES = ["defaults:", "  allow_dispatch: true", ""];
-const WITH_STALE_KEY = [...BASE_LINES.slice(0, 1), "  subagent_context_file: AGENTS-addition.md", ...BASE_LINES.slice(1)];
+const WITH_STALE_KEY = [...BASE_LINES.slice(0, 1), "  subagent_context_file: pi-minimal-harness.md", ...BASE_LINES.slice(1)];
 const WITH_LIVE_KEY = [...BASE_LINES.slice(0, 1), "  subagent_context_file: contracts/harness.md", ...BASE_LINES.slice(1)];
-const MARKED_AGENTS = ["# Project", "", "<!-- BEGIN pi-minimal-harness -->", "## Harness workflow", "<!-- END pi-minimal-harness -->", ""].join("\n");
+const MARKED_AGENTS = ["# Project", "", "<!-- BEGIN pi-minimal-harness -->", "## pi-minimal-harness instructions", "<!-- END pi-minimal-harness -->", ""].join("\n");
 const BARE_AGENTS = ["# Project", "", "Nothing harness-specific here.", ""].join("\n");
 
-await fs.writeFile(path.join(contractRoot, "AGENTS-addition.md"), "contract\n", "utf8");
+await fs.writeFile(path.join(contractRoot, "pi-minimal-harness.md"), "contract\n", "utf8");
 const onlyStandalone = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
 check(
-  "contract: a standalone AGENTS-addition.md resolves",
-  onlyStandalone.path === path.join(contractRoot, "AGENTS-addition.md") && onlyStandalone.source === "AGENTS-addition.md",
+  "contract: the installed pi-minimal-harness.md resolves",
+  onlyStandalone.path === path.join(contractRoot, "pi-minimal-harness.md") && onlyStandalone.source === "pi-minimal-harness.md",
 );
 check("contract: no key configured means no stale config", onlyStandalone.staleConfig === null);
 
 await fs.writeFile(path.join(contractRoot, "AGENTS.md"), MARKED_AGENTS, "utf8");
-const pastedOnly = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
+const both = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
 check(
-  "contract: an AGENTS.md carrying the harness block resolves",
-  pastedOnly.path === path.join(contractRoot, "AGENTS.md") && pastedOnly.source === "AGENTS.md",
+  "contract: the contract file is preferred over the AGENTS.md that points at it",
+  both.path === path.join(contractRoot, "pi-minimal-harness.md") && both.source === "pi-minimal-harness.md",
 );
 
-await fs.rm(path.join(contractRoot, "AGENTS-addition.md"));
+await fs.rm(path.join(contractRoot, "pi-minimal-harness.md"));
+const pastedOnly = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
+check(
+  "contract: an AGENTS.md carrying the harness block resolves on its own",
+  pastedOnly.path === path.join(contractRoot, "AGENTS.md") && pastedOnly.source === "AGENTS.md",
+);
 const staleOnly = mod.resolveContractPath(WITH_STALE_KEY, contractCfg, contractRoot);
 check(
   "contract: a configured key that no longer exists falls back to AGENTS.md",
   staleOnly.path === path.join(contractRoot, "AGENTS.md") &&
-    staleOnly.staleConfig === path.join(contractRoot, "AGENTS-addition.md"),
+    staleOnly.staleConfig === path.join(contractRoot, "pi-minimal-harness.md"),
 );
 
+// The legacy file name is a last resort: it only resolves when nothing better
+// does, so a project that has the block in its AGENTS.md is served by that.
 await fs.writeFile(path.join(contractRoot, "AGENTS.md"), BARE_AGENTS, "utf8");
+await fs.writeFile(path.join(contractRoot, "AGENTS-addition.md"), "legacy contract\n", "utf8");
+const legacyOnly = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
+check(
+  "contract: a legacy AGENTS-addition.md still resolves",
+  legacyOnly.source === "AGENTS-addition.md" && legacyOnly.path === path.join(contractRoot, "AGENTS-addition.md"),
+);
+
+await fs.rm(path.join(contractRoot, "AGENTS-addition.md"));
 const bareOnly = mod.resolveContractPath(BASE_LINES, contractCfg, contractRoot);
 check("contract: an AGENTS.md without the harness block is not a contract", bareOnly.path === null);
 check(
   "contract: every candidate is reported when nothing resolves",
-  bareOnly.candidates.length === 2 && bareOnly.candidates[0].endsWith("AGENTS.md"),
+  bareOnly.candidates.length === 3 &&
+    bareOnly.candidates[0].endsWith("pi-minimal-harness.md") &&
+    bareOnly.candidates[1].endsWith("AGENTS.md"),
 );
 const staleAndBare = mod.resolveContractPath(WITH_STALE_KEY, contractCfg, contractRoot);
 check("contract: a stale key with nothing else is unresolved, not fatal", staleAndBare.path === null && !!staleAndBare.staleConfig);
@@ -467,18 +487,18 @@ check(
   invalidEffortChecks.some((c) => c.label === 'agent "implementer" reasoning is supported by its model' && !c.ok),
 );
 check("validate includes the contract-file check (present)", checks.some((c) => c.label === "contract file for dispatched subagents exists" && c.ok));
-await fs.rm(path.join(tmp, "AGENTS-addition.md"));
+await fs.rm(path.join(tmp, "pi-minimal-harness.md"));
 const checksMissing = await mod.validate(lines, cfgPath, tmp);
 const missingCheck = checksMissing.find((c) => c.label === "contract file for dispatched subagents exists");
 check("validate: contract file missing -> fail", !!missingCheck && missingCheck.ok === false);
 check(
   "validate: the failure names every candidate it tried",
-  !!missingCheck && /AGENTS\.md/.test(missingCheck.detail ?? "") && /AGENTS-addition\.md/.test(missingCheck.detail ?? ""),
+  !!missingCheck && /pi-minimal-harness\.md/.test(missingCheck.detail ?? "") && /AGENTS\.md/.test(missingCheck.detail ?? ""),
 );
 // The reported failure mode: the key still names a file that was deleted after
 // pasting, which must stay green through the AGENTS.md fallback.
 const staleLines = cfgText.split(/\r?\n/);
-staleLines.splice(staleLines.indexOf("defaults:") + 1, 0, "  subagent_context_file: AGENTS-addition.md");
+staleLines.splice(staleLines.indexOf("defaults:") + 1, 0, "  subagent_context_file: pi-minimal-harness.md");
 await fs.writeFile(path.join(tmp, "AGENTS.md"), MARKED_AGENTS, "utf8");
 const staleChecks = await mod.validate(staleLines, cfgPath, tmp);
 check(
@@ -490,7 +510,7 @@ check(
   staleChecks.some((c) => c.label === "defaults.subagent_context_file points at an existing file" && !c.ok),
 );
 await fs.rm(path.join(tmp, "AGENTS.md"));
-await fs.copyFile(path.join(ROOT, "AGENTS-addition.md"), path.join(tmp, "AGENTS-addition.md"));
+await fs.copyFile(path.join(ROOT, "pi-minimal-harness.md"), path.join(tmp, "pi-minimal-harness.md"));
 
 // --- model + effort command ---------------------------------------------------
 const cfgBeforeModelCommand = await fs.readFile(cfgPath, "utf8");

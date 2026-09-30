@@ -9,7 +9,7 @@ the Pi coding agent, published for use in other people's projects.
 | Path | Purpose |
 |---|---|
 | `README.md` | Public front door: inspiration, install, configuration, commands, skills. |
-| `AGENTS-addition.md` | The generic, paste-able contract for projects that adopt the harness (this is what adopters add to their own `AGENTS.md`). |
+| `pi-minimal-harness.md` | The generic harness contract, copied verbatim to the root of every adopting project and pointed at from their `AGENTS.md`. |
 | `harness.config.yaml` | Single source of truth: `defaults` (mode, auto-harness, short-circuit, dispatch gate, contract file), `commands`, `workflows` (mode → agent steps), `agents` (model, reasoning, tools, prompt template), `skills`. |
 | `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool. |
 | `prompts/` | Per-agent prompt templates referenced by `harness.config.yaml`. |
@@ -49,9 +49,10 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   `1/1 <agent>`; during step 1 the total is shown only once the decision is known.
 - The `harness-dispatch` tool runs independent tasks in isolated `pi`
   subprocesses with a curated brief; gated by `defaults.allow_dispatch` and by
-  the subagent contract — `defaults.subagent_context_file` when it resolves, an
-  `AGENTS.md` carrying the harness block, or a standalone
-  `AGENTS-addition.md`, in that order (see `docs/DISPATCH-PLAN.md`).
+  the subagent contract, resolved by existence in this order:
+  `defaults.subagent_context_file` when it resolves, `pi-minimal-harness.md`,
+  an `AGENTS.md` carrying the harness block, then a legacy `AGENTS-addition.md`
+  (see `docs/DISPATCH-PLAN.md`).
 - The control tools `harness_decision` and `harness_report` record the pipeline's
   control flow. Their state is captured in their own `execute`, which runs after
   the `message_end` hook — so the tool must assign unconditionally and the hook
@@ -78,7 +79,7 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   one source of truth and do not duplicate mode/agent definitions across files.
 - **Keep the published surface generic**: no target-application specifics (other
   projects' tech stack, product rules, languages) in `README.md`,
-  `AGENTS-addition.md`, `prompts/`, `.agents/skills/` or the config.
+  `pi-minimal-harness.md`, `prompts/`, `.agents/skills/` or the config.
 - No new npm dependencies in the extension; keep the indentation-aware YAML
   editing so user formatting is preserved.
 - The extension must keep working in non-interactive modes: guard terminal-only

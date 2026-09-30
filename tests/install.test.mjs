@@ -63,19 +63,28 @@ test("init installs resources and is idempotent", async () => {
       "prompts/orchestrator.md",
       ".agents/skills/github-delivery/SKILL.md",
       "harness.config.yaml",
+      "pi-minimal-harness.md",
       "AGENTS.md",
     ]) {
       await fs.access(path.join(project, relative));
     }
     const agents = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
     assert.equal((agents.match(/<!-- BEGIN pi-minimal-harness -->/g) ?? []).length, 1);
-    assert.match(agents, /## Harness workflow/);
+    assert.match(agents, /^## pi-minimal-harness instructions$/m);
+    assert.match(agents, /^\* \*\*Harness Rules:\*\* Read pi-minimal-harness\.md and strictly follow its guidelines for this project's harness\.$/m);
+    assert.match(
+      agents,
+      /^\* \*\*Conflict Resolution:\*\* If any rules in AGENTS\.md conflict with pi-minimal-harness\.md, the rules in AGENTS\.md take precedence\.$/m,
+    );
+    // The contract is a file of its own: AGENTS.md points at it, never copies it.
+    assert.doesNotMatch(agents, /## Harness workflow/);
 
     const second = runInstaller(["init", "--project", project]);
     assert.equal(second.status, 0, second.stderr);
     const agentsAgain = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
     assert.equal((agentsAgain.match(/<!-- BEGIN pi-minimal-harness -->/g) ?? []).length, 1);
-    assert.match(second.stdout, /unchanged/);
+    assert.match(second.stdout, /unchanged AGENTS\.md \(harness reference already present\)/);
+    assert.equal(agentsAgain, agents);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
@@ -104,54 +113,121 @@ test("init refuses conflicts unless --force is supplied", async () => {
   }
 });
 
-test("a contract pasted without installer markers is recognised by content", async () => {
+test("a reference written by hand is recognised and never rewritten", async () => {
   const project = await tempProject();
   try {
     assert.equal(runInstaller(["init", "--project", project]).status, 0);
     const agents = path.join(project, "AGENTS.md");
-    // The documented adoption path pastes the section and never writes markers.
-    const marked = await fs.readFile(agents, "utf8");
-    const pasted = marked.replace(/<!-- BEGIN pi-minimal-harness -->\n|<!-- END pi-minimal-harness -->\n/g, "");
-    await fs.writeFile(agents, pasted, "utf8");
+    const handWritten = [
+      "# Project",
+      "",
+      "## pi-minimal-harness instructions",
+      "* **Harness Rules:** Read pi-minimal-harness.md and strictly follow its guidelines for this project's harness.",
+      "* **Conflict Resolution:** If any rules in AGENTS.md conflict with pi-minimal-harness.md, the rules in AGENTS.md take precedence.",
+      "",
+      "- a rule of this project",
+      "",
+    ].join("\n");
+    await fs.writeFile(agents, handWritten, "utf8");
 
     for (const args of [["update"], ["init", "--force"]]) {
       const result = runInstaller([...args, "--project", project]);
       assert.equal(result.status, 0, result.stderr);
-      assert.match(result.stdout, /AGENTS\.md \(harness contract already present, pasted without installer markers\)/);
-      assert.equal(await fs.readFile(agents, "utf8"), pasted);
+      assert.match(result.stdout, /AGENTS\.md \(harness reference already present\)/);
+      assert.equal(await fs.readFile(agents, "utf8"), handWritten);
     }
-
-    // A project rule after the section is the point of pasting, not a conflict.
-    const withRule = `${pasted}\n- a rule of this project\n`;
-    await fs.writeFile(agents, withRule, "utf8");
-    const kept = runInstaller(["update", "--project", project]);
-    assert.equal(kept.status, 0, kept.stderr);
-    assert.equal(await fs.readFile(agents, "utf8"), withRule);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
 });
 
-test("a hand-edited contract is refused and left untouched", async () => {
+test("update replaces a pasted contract with the reference, init only notes it", async () => {
   const project = await tempProject();
   try {
     assert.equal(runInstaller(["init", "--project", project]).status, 0);
     const agents = path.join(project, "AGENTS.md");
-    const pasted = (await fs.readFile(agents, "utf8")).replace(
-      /<!-- BEGIN pi-minimal-harness -->\n|<!-- END pi-minimal-harness -->\n/g,
+    const legacy = [
+      "# Project",
       "",
-    );
-    const edited = pasted.replace(
-      "- Work is executed through the `pi-minimal-harness` pipeline.",
-      "- Work is executed the way this project prefers.",
-    );
-    await fs.writeFile(agents, edited, "utf8");
+      "- a rule of this project",
+      "",
+      "<!-- BEGIN pi-minimal-harness -->",
+      "## Harness workflow",
+      "",
+      "- the contract an older release pasted here",
+      "<!-- END pi-minimal-harness -->",
+      "",
+    ].join("\n");
+    await fs.writeFile(agents, legacy, "utf8");
+
+    // init is not an upgrade: it says so and leaves the marked block alone.
+    const init = runInstaller(["init", "--project", project]);
+    assert.equal(init.status, 0, init.stderr);
+    assert.match(init.stdout, /note AGENTS\.md carries a pasted harness contract/);
+    assert.equal(await fs.readFile(agents, "utf8"), legacy);
+
+    const update = runInstaller(["update", "--project", project]);
+    assert.equal(update.status, 0, update.stderr);
+    assert.match(update.stdout, /replace the pasted harness contract in AGENTS\.md/);
+    const migrated = await fs.readFile(agents, "utf8");
+    assert.match(migrated, /^# Project$/m);
+    assert.match(migrated, /^- a rule of this project$/m);
+    assert.match(migrated, /^## pi-minimal-harness instructions$/m);
+    assert.doesNotMatch(migrated, /## Harness workflow/);
+    assert.equal((migrated.match(/BEGIN pi-minimal-harness/g) ?? []).length, 1);
+    assert.equal((migrated.match(/END pi-minimal-harness/g) ?? []).length, 1);
+
+    // The contract the paste pointed at now lives in its own file, refreshed
+    // by the same run.
+    const contract = await fs.readFile(path.join(project, "pi-minimal-harness.md"), "utf8");
+    assert.match(contract, /^## Harness workflow$/m);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("a contract pasted by hand is kept and the reference is added next to it", async () => {
+  const project = await tempProject();
+  try {
+    assert.equal(runInstaller(["init", "--project", project]).status, 0);
+    const agents = path.join(project, "AGENTS.md");
+    const handPasted = ["# Project", "", "## Harness workflow", "", "- rules this project pasted", ""].join("\n");
+    await fs.writeFile(agents, handPasted, "utf8");
+
+    const dry = runInstaller(["update", "--project", project, "--dry-run"]);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, /note AGENTS\.md carries a hand-pasted harness contract/);
+    assert.equal(await fs.readFile(agents, "utf8"), handPasted);
+
+    const result = runInstaller(["update", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /append harness reference to AGENTS\.md/);
+    const updated = await fs.readFile(agents, "utf8");
+    // The project's own text is never rewritten: the reference is additive and
+    // a repeat run finds it.
+    assert.match(updated, /^- rules this project pasted$/m);
+    assert.match(updated, /^## pi-minimal-harness instructions$/m);
+    const again = runInstaller(["update", "--project", project]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(await fs.readFile(agents, "utf8"), updated);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("a half-written reference is left untouched", async () => {
+  const project = await tempProject();
+  try {
+    assert.equal(runInstaller(["init", "--project", project]).status, 0);
+    const agents = path.join(project, "AGENTS.md");
+    const partial = ["# Project", "", "## pi-minimal-harness instructions", "* **Harness Rules:** Read pi-minimal-harness.md.", ""].join("\n");
+    await fs.writeFile(agents, partial, "utf8");
 
     for (const args of [["update"], ["init", "--force"]]) {
       const result = runInstaller([...args, "--project", project]);
-      assert.notEqual(result.status, 0, `${args.join(" ")} should refuse`);
-      assert.match(result.stderr, /differs from this release/);
-      assert.equal(await fs.readFile(agents, "utf8"), edited);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /differs from this release/);
+      assert.equal(await fs.readFile(agents, "utf8"), partial);
     }
   } finally {
     await fs.rm(project, { recursive: true, force: true });
@@ -200,18 +276,26 @@ test("a fresh install reports the template placeholders it shipped", async () =>
   }
 });
 
-test("init writes only the contract section, and creates a changelog when missing", async () => {
+test("init ships the contract with its preamble commented, and creates a changelog when missing", async () => {
   const project = await tempProject();
   try {
     const result = runInstaller(["init", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
 
+    const contract = await fs.readFile(path.join(project, "pi-minimal-harness.md"), "utf8");
+    // The preamble is documentation for whoever reads the file, not an
+    // instruction for an agent, so everything above the first section is
+    // inside an HTML comment.
+    const preamble = contract.slice(0, contract.indexOf("## Harness workflow"));
+    assert.equal(preamble.replace(/<!--[\s\S]*?-->/g, "").replace(/---/g, "").trim(), "");
+    assert.match(contract, /^## Harness workflow$/m);
+    // The whole file is the contract now: there is no slice to take.
+    assert.doesNotMatch(contract, /Two ways to adopt/);
+
     const agents = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
-    // The preamble is documentation for whoever reads AGENTS-addition.md, not
-    // part of what an agent should receive.
     assert.doesNotMatch(agents, /Two ways to adopt/);
-    assert.doesNotMatch(agents, /^# AGENTS-addition\.md/m);
-    assert.match(agents, /^## Harness workflow$/m);
+    assert.doesNotMatch(agents, /^# pi-minimal-harness\.md/m);
+    assert.match(agents, /^## pi-minimal-harness instructions$/m);
     assert.equal((agents.match(/BEGIN pi-minimal-harness/g) ?? []).length, 1);
     assert.equal((agents.match(/END pi-minimal-harness/g) ?? []).length, 1);
 
@@ -320,23 +404,31 @@ test("update replaces upstream files and keeps the local indentation width", asy
     assert.equal(runInstaller(["init", "--project", project]).status, 0);
     const extension = path.join(project, ".pi", "extensions", "harness.ts");
     const prompt = path.join(project, "prompts", "orchestrator.md");
+    const contract = path.join(project, "pi-minimal-harness.md");
     await fs.writeFile(extension, "local change\n", "utf8");
     await fs.writeFile(prompt, "stale prompt\n", "utf8");
+    await fs.writeFile(contract, "stale contract\n", "utf8");
     const config = path.join(project, "harness.config.yaml");
     await fs.writeFile(config, LOCAL_CONFIG.replace(/^ {2}/gm, "    "), "utf8");
 
     const result = runInstaller(["update", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /replace .*harness\.ts/);
+    assert.match(result.stdout, /replace .*pi-minimal-harness\.md/);
     assert.equal(
       await fs.readFile(prompt, "utf8"),
       await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8"),
+    );
+    assert.equal(
+      await fs.readFile(contract, "utf8"),
+      await fs.readFile(path.join(ROOT, "pi-minimal-harness.md"), "utf8"),
     );
     const merged = await fs.readFile(config, "utf8");
     assert.match(merged, /^ {4}workflow_mode: full$/m);
     assert.match(merged, /^ {4}auto_harness: true$/m);
     const agents = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
     assert.equal((agents.match(/<!-- BEGIN pi-minimal-harness -->/g) ?? []).length, 1);
+    assert.match(agents, /^## pi-minimal-harness instructions$/m);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }

@@ -11,7 +11,7 @@
     ".pi/extensions/",
     "prompts/",
     ".agents/skills/github-delivery/",
-    "AGENTS-addition.md",
+    "pi-minimal-harness.md",
     "harness.config.example.yaml",
     "README.md",
     "LICENSE"
