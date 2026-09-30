@@ -17,6 +17,12 @@ Explore only — **do not edit any file** in this step.
    CodeGraph when relationships or impact of a change matter.
 3. Identify the existing patterns and conventions a solution must follow.
 4. Propose a concrete solution approach: ordered steps and affected files.
+5. Record what is worth reusing with `mem_save` (Engram): where the relevant
+   code lives and how it is wired, a gotcha, a non-obvious discovery about
+   the codebase. One entry per finding, with what, why, where and what
+   surprised you — findings, not a transcript of what you read. If the Engram
+   tools are unavailable in this runtime, carry the same findings in the
+   `lessons` field of your report instead.
 
 ## Required output format
 
@@ -41,7 +47,9 @@ expand what you need.
 Write the report above, then call **`harness_report`** exactly once with
 `changed_files` (empty when nothing changed), `checks` (the commands you
 actually ran, with `passed` / `failed` / `skipped` — never claim a check you did
-not run) and `notes`.
+not run), `notes` and `lessons` (the findings you saved with `mem_save`; `[]`
+when there are none). All four fields are required: a report missing one of
+them is incomplete and the harness sends you a repair turn.
 
 **Fallback, only if the tool is unavailable:** end your reply with
 `HARNESS-DONE` as the last line.

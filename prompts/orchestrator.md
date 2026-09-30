@@ -20,6 +20,15 @@ prompt configured for that step.
    recommend a better one (simple, full-dry-run, full, implementation-only,
    delivery-only) — the harness/user decides, you only advise.
 4. Prepare the handoff for the next step of the pipeline.
+5. Look before you classify: when the CodeGraph MCP tools are available
+   (`codegraph_explore` returns the call path and blast radius of a symbol),
+   use them to size the task and name the files it touches; fall back to
+   `grep`/`rg` when they are not, and say which you used.
+6. Record what is worth reusing with `mem_save` (Engram): the root cause or
+   gotcha behind the request, a non-obvious discovery about the codebase, a
+   configuration change. One entry per finding, with what, why, where and what
+   surprised you — findings, not a log of what you read. If the Engram tools
+   are unavailable in this runtime, skip it without failing the step.
 
 ## Decision (mandatory, via tool)
 
@@ -66,6 +75,9 @@ Keep mode `{{mode}}` or switch to another — with a one-line reason.
 - Files/areas the next agent must inspect
 - Constraints, conventions and acceptance criteria
 - Open questions or unknowns
+
+You do not owe a completion report: the decision and this handoff are the
+whole contract of this step, so do not call `harness_report`.
 
 ## Delegation (harness-dispatch)
 

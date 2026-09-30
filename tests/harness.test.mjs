@@ -1158,7 +1158,12 @@ reset();
 assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
 pendingToolCall = {
   name: "harness_report",
-  params: { changed_files: ["a.ts", "b.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "listo" },
+  params: {
+    changed_files: ["a.ts", "b.ts"],
+    checks: [{ command: "npm test", result: "passed" }],
+    notes: "listo",
+    lessons: ["npm test is the only gate here"],
+  },
 };
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea con report", waitTurn);
 check("report tool: a harness_report call satisfies the step with no marker", sent.length === 2, `got ${sent.length}`);
@@ -1166,6 +1171,180 @@ check(
   "report tool: no repair turn and no missing-report warning",
   !notifies.some((n) => n.includes("did not report")) && !notifies.some((n) => n.includes("report is missing")),
   notifies.join(" | "),
+);
+
+// --- exploration and memory are reachable in the default mode ---------------
+
+const cfgLines = (await fs.readFile(cfgPath, "utf8")).split("\n");
+const simpleSteps = mod.getWorkflowSteps(cfgLines, "simple") ?? [];
+const implementerTools = mod.getAgentTools(cfgLines, "implementer");
+check(
+  "config: the implementer of the default mode is granted codegraph",
+  simpleSteps.includes("implementer") && implementerTools.includes("codegraph"),
+  `simple=${simpleSteps.join("->")} tools=${implementerTools.join(",")}`,
+);
+check(
+  "config: the orchestrator, which runs in every mode, is granted codegraph too",
+  mod.getAgentTools(cfgLines, "orchestrator").includes("codegraph"),
+  mod.getAgentTools(cfgLines, "orchestrator").join(","),
+);
+check(
+  "config: engram stays with the agents that record findings",
+  ["orchestrator", "explorer", "implementer"].every((a) => mod.getAgentTools(cfgLines, a).includes("engram")),
+);
+check(
+  "config: an agent without a tools list still resolves to no tools (backward compatibility)",
+  JSON.stringify(mod.getAgentTools(["agents:", "  x:", "    model: p/m"], "x")) === "[]" &&
+    JSON.stringify(mod.getAgentTools(cfgLines, "no-such-agent")) === "[]",
+);
+// The example config is what `init` copies into an adopting project.
+const exampleLines = (await fs.readFile(path.join(ROOT, "harness.config.example.yaml"), "utf8")).split("\n");
+check(
+  "config: the shipped example grants codegraph to the implementer of the default mode too",
+  (mod.getWorkflowSteps(exampleLines, "simple") ?? []).includes("implementer") &&
+    mod.getAgentTools(exampleLines, "implementer").includes("codegraph") &&
+    mod.getAgentTools(exampleLines, "orchestrator").includes("codegraph"),
+  mod.getAgentTools(exampleLines, "implementer").join(","),
+);
+
+// The rendered prompt is what the model actually reads: the dependency check
+// and the memory write have to survive rendering, not just live in the file.
+const implementerPrompt = mod.renderPrompt(
+  await fs.readFile(path.join(ROOT, "prompts", "implementer.md"), "utf8"),
+  { task: "tarea", mode: "simple", agent: "implementer", step: "2", steps: "2", previous: "" },
+);
+check(
+  "prompt: the implementer is told to check dependents before editing a shared symbol",
+  /depend/i.test(implementerPrompt) && implementerPrompt.includes("codegraph_explore") && /\bgrep\b|\brg\b/.test(implementerPrompt),
+  implementerPrompt.slice(0, 0),
+);
+check("prompt: the implementer is told to record findings with mem_save", implementerPrompt.includes("mem_save"));
+check("prompt: the local-change escape hatch is stated", /local,\s+obviously unreferenced/i.test(implementerPrompt));
+check("prompt: the report format carries a lessons field", implementerPrompt.includes("### Lessons"));
+check(
+  "prompt: the orchestrator and explorer record findings with mem_save too",
+  (await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8")).includes("mem_save") &&
+    (await fs.readFile(path.join(ROOT, "prompts", "explorer.md"), "utf8")).includes("mem_save"),
+);
+const reportTemplates = {};
+for (const f of ["critic.md", "delivery.md", "explorer.md", "implementer.md"]) {
+  reportTemplates[f] = await fs.readFile(path.join(ROOT, "prompts", f), "utf8");
+}
+check(
+  "prompt: every template that owes a report names the lessons field",
+  Object.values(reportTemplates).every((t) => t.includes("`lessons`")),
+  Object.entries(reportTemplates)
+    .filter(([, t]) => !t.includes("`lessons`"))
+    .map(([f]) => f)
+    .join(",") || "all four",
+);
+
+// --- report completeness: a missing field is repaired like a missing report --
+
+const completeReport = {
+  changedFiles: ["a.ts"],
+  checks: [{ command: "node tests/harness.test.mjs", result: "passed" }],
+  lessons: [],
+  notes: "",
+};
+check("gaps: a complete report has no gaps", mod.reportGaps(completeReport, "").length === 0);
+check("gaps: [] counts as a delivered field, not as a gap", mod.reportGaps(completeReport, "sin marker").length === 0);
+check(
+  "gaps: a report without lessons is a gap",
+  JSON.stringify(mod.reportGaps({ ...completeReport, lessons: null }, "")) === '["lessons"]',
+  JSON.stringify(mod.reportGaps({ ...completeReport, lessons: null }, "")),
+);
+check(
+  "gaps: a report without changed_files or checks is a gap too",
+  JSON.stringify(mod.reportGaps({ changedFiles: null, checks: null, lessons: [], notes: "" }, "")) ===
+    '["changed_files","checks"]',
+);
+check("gaps: no report at all is a gap", JSON.stringify(mod.reportGaps(null, "")) === '["harness_report call"]');
+check("gaps: the HARNESS-DONE fallback cannot be inspected, so it always counts", mod.reportGaps(null, "texto\n\nHARNESS-DONE").length === 0);
+check(
+  "lessons: a bare string, blanks and a non-list are normalized",
+  JSON.stringify(mod.normalizeLessons(" una")) === '["una"]' &&
+    JSON.stringify(mod.normalizeLessons("  ")) === "null" &&
+    JSON.stringify(mod.normalizeLessons([" a ", ""])) === '["a"]' &&
+    JSON.stringify(mod.normalizeLessons(["", " "])) === "null" &&
+    JSON.stringify(mod.normalizeLessons([])) === "[]" &&
+    mod.normalizeLessons(undefined) === null &&
+    mod.normalizeLessons(42) === null,
+);
+
+/** waitForTurn that injects a tool call on a chosen turn of the pipeline. */
+const waitTurnInjecting = (injections) => async () => {
+  while (injections.length > 0 && assistantTurns >= injections[0].after) {
+    const next = injections.shift();
+    if (next.call) pendingToolCall = next.call;
+  }
+  await new Promise((r) => setTimeout(r, 140));
+};
+
+// A report that forgets `lessons` is incomplete: one repair turn, named field.
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE", "### Changes\n- a.ts", "### Changes\n- a.ts\n\n### Lessons\n- the root cause");
+const withoutLessons = waitTurnInjecting([
+  {
+    after: 1,
+    call: {
+      name: "harness_report",
+      params: { changed_files: ["a.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "listo" },
+    },
+  },
+  { after: 2, call: { name: "harness_report", params: { ...completeReport, changed_files: ["a.ts"] } } },
+]);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "reporte sin lessons", withoutLessons);
+check("lessons: a report missing lessons earns exactly one repair turn", sent.length === 3, `got ${sent.length}`);
+check("lessons: the repair prompt names the missing field", sent[2]?.includes("lessons"), String(sent[2]).slice(0, 200));
+check(
+  "lessons: the completed repair finishes the pipeline",
+  notifies.some((n) => n.includes("finished: orchestrator -> implementer")) && !notifies.some((n) => n.includes("did not report")),
+  notifies.join(" | "),
+);
+
+// Still incomplete after the repair turn: the pipeline stops, naming the field.
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE", "### Changes\n- a.ts", "### Changes\n- a.ts");
+const alwaysWithoutLessons = waitTurnInjecting([
+  {
+    after: 1,
+    call: {
+      name: "harness_report",
+      params: { changed_files: ["a.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "listo" },
+    },
+  },
+  {
+    after: 2,
+    call: {
+      name: "harness_report",
+      params: { changed_files: ["a.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "listo" },
+    },
+  },
+]);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "reporte incompleto", alwaysWithoutLessons);
+check(
+  "lessons: a report still missing lessons after the repair stops the pipeline",
+  sent.length === 3 && notifies.some((n) => n.includes("did not report") && n.includes("lessons")),
+  `${sent.length} | ${notifies.join(" | ")}`,
+);
+
+// A report sent by the orchestrator never stands in for the next step's report.
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+const staleReport = waitTurnInjecting([
+  { after: 0, call: { name: "harness_report", params: { ...completeReport, changed_files: [] } } },
+  {
+    after: 2,
+    call: { name: "harness_report", params: { changed_files: ["a.ts"], checks: [{ command: "npm test", result: "passed" }], notes: "x" } },
+  },
+]);
+assistantScript.push("### Changes\n- a.ts");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "informe del orquestador", staleReport);
+check(
+  "report: a stale report from the orchestrator does not satisfy the implementer",
+  sent.length === 3,
+  `got ${sent.length}`,
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

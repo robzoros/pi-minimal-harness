@@ -53,11 +53,15 @@ agents:
     tools:
       - filesystem
       - engram
+      # The orchestrator runs in every mode, so structural exploration belongs
+      # here too; remove the line when CodeGraph is not installed.
+      - codegraph
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task
       - select_workflow_mode
       - prepare_next_agent_prompt
+      - record_findings_with_engram
   explorer:
     model: provider/model-id
     reasoning: high
@@ -72,6 +76,7 @@ agents:
       - explore_repository
       - identify_relevant_files
       - propose_solution
+      - record_findings_with_engram
   critic:
     model: provider/model-id
     reasoning: medium
@@ -93,11 +98,16 @@ agents:
       - shell
       - tests
       - engram
+      # `simple` and `implementation-only` never run the explorer, so the only
+      # step that edits files needs the impact check itself.
+      - codegraph
     prompt_template: prompts/implementer.md
     responsibilities:
+      - check_dependents_before_editing_shared_symbols
       - edit_files
       - run_checks
       - inspect_diff
+      - record_findings_with_engram
   delivery:
     model: provider/model-id
     reasoning: low

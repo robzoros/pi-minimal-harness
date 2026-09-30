@@ -39,11 +39,15 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   the pipeline instead of reading its absence as `PIPELINE`.
 - `defaults.auto_harness` sends plain (non-slash) requests through the pipeline;
   `defaults.question_short_circuit` enables the orchestrator's early exit.
-- The driver checks every step's report: a `harness_report` call satisfies it, and
-  the textual marker `HARNESS-DONE` is the fallback. If neither is present the
-  driver sends exactly one repair turn for that step, naming it, and stops the
-  pipeline if the report is still missing. A direct answer (`ANSWER_ONLY`) needs
-  no report and is never repaired.
+- The driver checks every step's report: a complete `harness_report` call
+  (`changed_files`, `checks`, `notes`, `lessons` all present, `[]` for a
+  genuinely empty one) satisfies it, and the textual marker `HARNESS-DONE` is
+  the fallback — it cannot be inspected, so it always counts. A missing or
+  incomplete report gets exactly one repair turn for that step, naming the
+  missing field, and stops the pipeline if it is still incomplete. A direct
+  answer (`ANSWER_ONLY`) needs no report and is never repaired. A report the
+  orchestrator happened to send is cleared before the next step, so it can
+  never stand in for that step's own report.
 - The orchestrator's `HARNESS-DECISION` marker is stripped from the reply and
   shown in the footer instead (`decision: …`). For questions the footer ends at
   `1/1 <agent>`; during step 1 the total is shown only once the decision is known.
@@ -58,6 +62,15 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   the `message_end` hook — so the tool must assign unconditionally and the hook
   only when empty, or the textual fallback would win. They are inert outside a
   pipeline.
+- The `harness_report` tool carries a `lessons` field: the findings the step
+  also saves with `mem_save`. The driver validates presence, not content
+  (`reportGaps`), so `[]` is the way to say "nothing" and an omitted field is
+  what earns a repair turn.
+- Exploration and memory are reachable in every mode, not only in `full`:
+  `codegraph` is granted to the `orchestrator`, `explorer` and `implementer`,
+  and `engram` to the same three, and the prompt templates name both. A grant
+  is declarative, so a runtime without the tool degrades to the `grep`/`rg`
+  fallback the templates describe instead of failing.
 - The repository preflight reads `defaults.preflight_policy`: `advisory` only
   reports, `blocking` stops the first agent marked `mutates_files: true` when
   the tree is dirty or a pull request is open — asked once with a TUI, blocked
