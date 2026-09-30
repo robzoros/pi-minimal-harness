@@ -42,8 +42,12 @@ expand what you need.
 
 Write the report above, then call **`harness_report`** exactly once with
 `changed_files` (empty — you do not edit files), `checks` (any checks you ran,
-with `passed` / `failed` / `skipped`) and `notes` (what the implementer must
-know about the blockers you found).
+with `passed` / `failed` / `skipped`), `notes` (what the implementer must
+know about the blockers you found) and `lessons` (what you learned reading
+the plan and the code — a wrong assumption you disproved, a constraint the
+plan missed; `[]` when there is nothing). All four fields are required: a
+report missing one of them is incomplete and the harness sends you a repair
+turn.
 
 **Fallback, only if the tool is unavailable:** end your reply with
 `HARNESS-DONE` as the last line.

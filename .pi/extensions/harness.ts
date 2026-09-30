@@ -63,9 +63,13 @@ let lastReport: HarnessReport | null = null;
 /** True while a pipeline is running: the harness tools are inert outside one. */
 let pipelineActive = false;
 
+export type CheckResult = "passed" | "failed" | "skipped";
+
 export interface HarnessReport {
-  changedFiles: string[];
-  checks: { command: string; result: "passed" | "failed" | "skipped" }[];
+  /** null when the field was omitted; [] when it was passed with nothing in it. */
+  changedFiles: string[] | null;
+  checks: { command: string; result: CheckResult }[] | null;
+  lessons: string[] | null;
   notes: string;
 }
 
@@ -79,11 +83,28 @@ export function normalizeDecision(value: unknown): HarnessDecision {
 }
 
 /** Normalize one check result from a tool call; unknown values read as skipped. */
-function normalizeCheckResult(value: unknown): HarnessReport["checks"][number]["result"] {
+function normalizeCheckResult(value: unknown): CheckResult {
   const key = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (key === "passed" || key === "pass" || key === "ok") return "passed";
   if (key === "failed" || key === "fail") return "failed";
   return "skipped";
+}
+
+/**
+ * Normalize the `lessons` field of a report: null when the agent left it out
+ * or sent nothing usable in it, [] when it deliberately said "nothing to
+ * record". A single string is accepted because models send one instead of a
+ * one-element list often enough to be worth tolerating.
+ */
+export function normalizeLessons(value: unknown): string[] | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text ? [text] : null;
+  }
+  if (!Array.isArray(value)) return null;
+  const lessons = value.filter((l): l is string => typeof l === "string" && l.trim() !== "").map((l) => l.trim());
+  return lessons.length > 0 || value.length === 0 ? lessons : null;
 }
 
 /** Last pipeline progress line shown in the footer (null when no run is active). */
@@ -216,6 +237,25 @@ export function listAgents(lines: string[]): string[] {
 
 function agentBlock(lines: string[], agent: string): { start: number; end: number } | null {
   return nestedBlock(lines, "agents", agent);
+}
+
+/** Tools granted to an agent, in config order ([] when the agent grants none). */
+export function getAgentTools(lines: string[], agent: string): string[] {
+  const block = agentBlock(lines, agent);
+  if (!block) return [];
+  let inTools = false;
+  const tools: string[] = [];
+  for (let i = block.start; i < block.end; i++) {
+    if (/^ {4}tools:\s*$/.test(lines[i])) {
+      inTools = true;
+      continue;
+    }
+    if (!inTools) continue;
+    if (/^ {4}\S/.test(lines[i])) break;
+    const item = lines[i].match(/^ {6}-\s+(\S+)\s*$/);
+    if (item) tools.push(item[1]);
+  }
+  return tools;
 }
 
 function getBlockField(lines: string[], block: { start: number; end: number }, field: string): string | null {
@@ -639,14 +679,37 @@ function lastAssistantTurn(ctx: ExtensionContext): LastTurn | null {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * One repair turn, sent when a step omits its mandatory report. The agent name
- * is included so a stalled step is identifiable in the transcript.
+ * One repair turn, sent when a step owes a report and did not deliver a
+ * complete one. The agent name is included so a stalled step is
+ * identifiable in the transcript, and the gaps so the agent knows exactly
+ * which field to add instead of rewriting a report that was nearly right.
  */
-function reportRepairPrompt(agentName: string): string {
+function reportRepairPrompt(agentName: string, gaps: string[]): string {
+  const detail = gaps.length > 0 ? ` Its report is missing: ${gaps.join(", ")}.` : "";
   return (
-    `The previous response from "${agentName}" ended without a completion report: no \`harness_report\` call and no \`HARNESS-DONE\` marker, and no report in the required format (### Changes / ### Evidence / ### Notes for delivery). ` +
-    "Write the full report now and call harness_report(changed_files, checks, notes) — or end with `HARNESS-DONE` if the tool is unavailable."
+    `The previous response from "${agentName}" ended without a complete completion report: no \`harness_report\` call and no \`HARNESS-DONE\` marker, and no complete report in the required format (### Changes / ### Evidence / ### Notes for delivery / ### Lessons).` +
+    `${detail} Write the full report now and call harness_report(changed_files, checks, notes, lessons) — or end with \`HARNESS-DONE\` if the tool is unavailable. ` +
+    "Pass `[]` for a field that is genuinely empty; omitting a field is what makes the report incomplete."
   );
+}
+
+/**
+ * What a finished step is still missing before its report counts.
+ *
+ * The textual `HARNESS-DONE` fallback cannot be inspected, so it stays a
+ * complete report. A `harness_report` call counts only when it carries
+ * every field the report contract names: an agent with nothing to record
+ * says so with `[]`, while an omitted or blank field is a gap and earns the
+ * same single repair turn as a missing report.
+ */
+export function reportGaps(report: HarnessReport | null, text: string): string[] {
+  if (/\bHARNESS-DONE\b/.test(text)) return [];
+  if (!report) return ["harness_report call"];
+  const gaps: string[] = [];
+  if (!Array.isArray(report.changedFiles)) gaps.push("changed_files");
+  if (!Array.isArray(report.checks)) gaps.push("checks");
+  if (!Array.isArray(report.lessons)) gaps.push("lessons");
+  return gaps;
 }
 
 /**
@@ -1030,20 +1093,30 @@ export async function runPipeline(
         }
       }
 
-      // Per-step report guarantee: every step that owes a report delivers it.
+      // A report the orchestrator happened to send is not the next step's
+      // report: drop it before the report guarantee below, which only applies
+      // to i > 0, so it can never stand in for the step that owes one.
+      if (i === 0) lastReport = null;
+
+      // Per-step report guarantee: every step that owes a report delivers a
+      // complete one (every field present, `[]` for a genuinely empty one).
       // Step 1 is exempt: the orchestrator's job is the decision plus the
       // handoff, not the report contract, and asking it for one would cost an
       // adopter an extra turn on a path that has always worked without it.
-      // A harness_report call satisfies it; the textual marker is the fallback.
+      // A complete harness_report call satisfies it; the textual marker is the
+      // fallback. An incomplete one is repaired exactly once, like a missing
+      // report.
       if (!shortCircuited && decision !== "answer_only" && i > 0) {
-        if (!lastReport && (!turn || !/\bHARNESS-DONE\b/.test(turn.text))) {
-          pi.sendUserMessage(reportRepairPrompt(agentName));
+        let gaps = reportGaps(lastReport, turn?.text ?? "");
+        if (gaps.length > 0) {
+          pi.sendUserMessage(reportRepairPrompt(agentName, gaps));
           await waitForTurn();
           const repaired = lastAssistantTurn(ctx);
-          if (!lastReport && (!repaired || !/\bHARNESS-DONE\b/.test(repaired.text))) {
+          gaps = reportGaps(lastReport, repaired?.text ?? "");
+          if (gaps.length > 0) {
             reportMissing = true;
             ctx.ui.notify(
-              `Pipeline stopped: step ${i + 1} (${agentName}) did not report (no harness_report call and no HARNESS-DONE) after one repair turn.`,
+              `Pipeline stopped: step ${i + 1} (${agentName}) did not report (no complete harness_report call and no HARNESS-DONE) after one repair turn: ${gaps.join(", ")}.`,
               "error",
             );
             break;
@@ -1381,6 +1454,8 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
   const commandDescription = "The check command as it was run";
   const resultDescription = "passed | failed | skipped";
   const notesDescription = "What the delivery step must know";
+  const lessonsDescription =
+    "Findings worth reusing: root causes, gotchas, codebase discoveries, configuration changes — the same ones saved with mem_save. Pass [] when there are none; an omitted field makes the report incomplete";
 
   let T: typeof import("typebox").Type | undefined;
   try {
@@ -1405,6 +1480,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
           ),
         ),
         notes: T.Optional(T.String({ description: notesDescription })),
+        lessons: T.Optional(T.Array(T.String({ description: lessonsDescription }))),
       }) as unknown as Record<string, unknown>,
     };
   }
@@ -1434,6 +1510,11 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
           },
         },
         notes: { type: "string", description: notesDescription },
+        lessons: {
+          type: "array",
+          items: { type: "string" },
+          description: lessonsDescription,
+        },
       },
     },
   };
@@ -2286,11 +2367,12 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         "Use it instead of the HARNESS-DONE line: the harness verifies the tool call, not the text.",
         "The markdown report is still written in the reply; this adds machine-readable data.",
       ].join(" "),
-      promptSnippet: "End a harness agent step with harness_report(changed_files, checks, notes) alongside the written report.",
+      promptSnippet: "End a harness agent step with harness_report(changed_files, checks, notes, lessons) alongside the written report.",
       promptGuidelines: [
         "Call harness_report exactly once, at the end of the turn, when finishing a harness pipeline step that owes a report.",
         "changed_files lists the paths you actually changed; checks lists the commands you actually ran, with their outcome.",
         "Report every check you could not run as skipped. Do not claim a check you did not run.",
+        "Every field is required: a report missing one of them is incomplete and costs a repair turn. Pass [] for a field that is genuinely empty, and lessons when there is anything worth remembering.",
       ],
       parameters: controlParams.harness_report as never,
       async execute(_toolCallId, params) {
@@ -2304,10 +2386,13 @@ export default async function harnessExtension(pi: ExtensionAPI) {
           changed_files?: unknown;
           checks?: unknown;
           notes?: unknown;
+          lessons?: unknown;
         };
+        // A field the agent omitted (or sent blank) stays null so the driver can
+        // call it a gap; [] is the explicit "nothing to record" and is complete.
         const changedFiles = Array.isArray(raw.changed_files)
           ? raw.changed_files.filter((p): p is string => typeof p === "string")
-          : [];
+          : null;
         const checks = Array.isArray(raw.checks)
           ? raw.checks
               .filter((c): c is { command: unknown; result?: unknown } => !!c && typeof c === "object")
@@ -2315,17 +2400,19 @@ export default async function harnessExtension(pi: ExtensionAPI) {
                 command: String((c as { command: unknown }).command ?? ""),
                 result: normalizeCheckResult((c as { result?: unknown }).result),
               }))
-          : [];
+          : null;
+        const lessons = normalizeLessons(raw.lessons);
         lastReport = {
           changedFiles,
           checks,
+          lessons,
           notes: typeof raw.notes === "string" ? raw.notes : "",
         };
         return {
           content: [
             {
               type: "text" as const,
-              text: `Report recorded: ${changedFiles.length} file(s), ${checks.length} check(s).`,
+              text: `Report recorded: ${changedFiles?.length ?? 0} file(s), ${checks?.length ?? 0} check(s), ${lessons?.length ?? 0} lesson(s).`,
             },
           ],
           details: undefined,

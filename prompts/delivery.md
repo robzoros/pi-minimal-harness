@@ -44,8 +44,12 @@ expand what you need.
 
 Write the report above, then call **`harness_report`** exactly once with
 `changed_files` (the paths in the delivered change), `checks` (the preconditions
-you verified, with `passed` / `failed` / `skipped`) and `notes` (the PR URL and
-number, or why delivery could not complete).
+you verified, with `passed` / `failed` / `skipped`), `notes` (the PR URL and
+number, or why delivery could not complete) and `lessons` (delivery gotchas
+worth the next agent's attention — a template or branch rule that bit you, a
+missing precondition; `[]` when there are none). All four fields are
+required: a report missing one of them is incomplete and the harness sends
+you a repair turn.
 
 **Fallback, only if the tool is unavailable:** end your reply with
 `HARNESS-DONE` as the last line.

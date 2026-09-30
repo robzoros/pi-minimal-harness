@@ -52,13 +52,21 @@ them to read this file.
   `defaults.strict_decision_marker` on, a turn with no usable decision stops the
   pipeline instead of assuming `PIPELINE`.
 - Every non-orchestrator agent writes a report in the form `### Changes` /
-  `### Evidence` / `### Notes for delivery` **and** calls `harness_report` with
-  `changed_files`, `checks` and `notes`. Without the tool, the fallback is
-  `HARNESS-DONE` as the last line. The harness verifies the call first and the
-  marker second; if neither is present it sends one repair turn for that step
-  and stops if the report is still missing.
+  `### Evidence` / `### Notes for delivery` / `### Lessons` **and** calls
+  `harness_report` with `changed_files`, `checks`, `notes` and `lessons`.
+  Without the tool, the fallback is `HARNESS-DONE` as the last line. All four
+  fields are required and `[]` is how a field with nothing in it is passed, so
+  an omitted field is an incomplete report: the harness sends one repair turn
+  for that step, naming the missing field, and stops if it is still
+  incomplete.
 - Reports are evidence-based: name the files changed, the checks actually run,
   and every check that could not be run.
+- Explore before editing. The agents are granted CodeGraph and Engram for
+  that: ask CodeGraph who calls a shared symbol before changing it (falling
+  back to `grep`/`rg` when it is unavailable or stale), and save what is worth
+  reusing with `mem_save` — root causes, gotchas, discoveries, configuration
+  changes — not a log of routine steps. A tool that is absent from the runtime
+  is skipped, never fatal.
 - The harness performs a repository preflight before a pipeline. Warn the user
   about uncommitted changes, branch divergence, or an open pull request; do not
   claim the repository is clean when it is not. With

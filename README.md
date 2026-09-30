@@ -35,7 +35,7 @@ workflow you can actually audit.
 | Workflow modes | `simple`, `full-dry-run`, `full`, `implementation-only`, `delivery-only` — ordered agent steps from one YAML |
 | Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
 | Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
-| Report guarantee | Every step that owes a report calls `harness_report` (fallback: ends with `HARNESS-DONE`); otherwise the harness sends one repair turn per step and stops if it is still missing |
+| Report guarantee | Every step that owes a report calls `harness_report` with all its fields (fallback: ends with `HARNESS-DONE`); an incomplete report earns one repair turn per step, and the pipeline stops if it is still incomplete |
 | Control tools | `harness_decision` and `harness_report` replace the textual markers as the primary signal; the markers stay as a one-release fallback |
 | Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
@@ -335,7 +335,11 @@ out of a reply:
 | Tool | Called by | Arguments |
 |---|---|---|
 | `harness_decision` | the orchestrator step, once at the end of the turn | `decision` (`ANSWER_ONLY` or `PIPELINE`, case-insensitive), `reason` |
-| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes` |
+| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes`, `lessons` (findings worth reusing; `[]` when there are none) |
+
+All four fields are required: a report that omits one is incomplete and gets
+the same single repair turn a missing report gets. The `HARNESS-DONE` marker
+cannot be inspected, so it always counts as complete.
 
 Both are inert outside a running pipeline, and an unusable argument makes the
 call fail instead of being silently ignored. When a tool call and a textual

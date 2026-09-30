@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Exploration and memory are now reachable in every workflow mode instead of
+  only in `full`. `codegraph` is granted to the `implementer` and to the
+  `orchestrator` (which runs in every mode), not only to the `explorer` that
+  `simple`, `implementation-only` and `delivery-only` never reach, and the
+  `orchestrator`, `explorer` and `implementer` templates instruct the agent to
+  record what is worth reusing with `mem_save` — root causes, gotchas,
+  non-obvious discoveries, configuration changes — instead of leaving the
+  Engram grant as a permission with nothing pointing at it. The implementer
+  also has to identify who depends on a symbol *before* editing it, with the
+  CodeGraph caller/impact information as the preferred mechanism and `grep`/`rg`
+  as the fallback when CodeGraph is unavailable or its index is stale; a local,
+  obviously unreferenced change is exempt. Grants are declarative and the
+  wording degrades gracefully, so a project without those servers installed
+  still runs. The contract file, `README.md` and `AGENTS.md` state both rules.
+- `harness_report` takes a `lessons` field: the findings a step also saved with
+  `mem_save`, shown in the `### Lessons` section every report template asks
+  for. All four fields are required, and `[]` is how a field with nothing in it
+  is passed, so an omitted or blank field is an incomplete report. The driver
+  treats it exactly like a missing report: one repair turn for that step,
+  naming the field it is missing, and the pipeline stops if the report is
+  still incomplete after it. The uninspectable `HARNESS-DONE` marker still
+  counts as complete.
+
+### Fixed
+
+- A `harness_report` call made during the orchestrator's turn satisfied the
+  report guarantee of the *next* step, so a step that reported nothing was
+  taken as reported. The report is now cleared after step 1, which is exempt
+  from the guarantee anyway.
+
 ### Changed
 
 - The contract is now a standalone file, `pi-minimal-harness.md`, instead of a
