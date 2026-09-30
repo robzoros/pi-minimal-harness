@@ -34,7 +34,7 @@ whole history. That requires separating the **stable** from the **variable**:
 
 | Channel | Content | Injection | Notes |
 |---|---|---|---|
-| Stable contract | `AGENTS-addition.md` (project rules) | subagent system prompt (`--append-system-prompt`) | fixed per agent, cacheable |
+| Stable contract | `pi-minimal-harness.md` (project rules) | subagent system prompt (`--append-system-prompt`) | fixed per agent, cacheable |
 | Curated brief | objective, relevant files with refs, constraints, acceptance criteria, expected evidence, non-goals, unknowns | subagent user message | the orchestrator's handoff — the *only* task context |
 
 If the brief omits something the subagent needs, the subagent reads files to
@@ -83,10 +83,12 @@ New keys in `harness.config.yaml` `defaults:`, with safe defaults:
 Contract resolution is a chain verified by existence, in this order:
 
 1. `defaults.subagent_context_file`, when it is set **and the file exists**;
-2. an `AGENTS.md` that carries the `<!-- BEGIN pi-minimal-harness -->` block —
-   which is what the installer writes, and therefore what every project that
-   pasted the contract has;
-3. a standalone `AGENTS-addition.md`.
+2. `pi-minimal-harness.md` — the contract the installer copies to the project
+   root, which the project's `AGENTS.md` points at;
+3. an `AGENTS.md` that carries the `<!-- BEGIN pi-minimal-harness -->` block —
+   what the installer writes, and what a project that pasted the contract has;
+4. a legacy standalone `AGENTS-addition.md`, so projects installed before the
+   rename keep dispatching.
 
 A configured value whose file no longer exists falls through to the next
 candidate instead of failing, because the additive config merge never removes

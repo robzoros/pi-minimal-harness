@@ -20,17 +20,28 @@ import { fileURLToPath } from "node:url";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESS_BLOCK_START = "<!-- BEGIN pi-minimal-harness -->";
 const HARNESS_BLOCK_END = "<!-- END pi-minimal-harness -->";
+/** The contract, copied verbatim to the root of every adopting project. */
+const CONTRACT_FILE = "pi-minimal-harness.md";
+/** What the project's AGENTS.md gets: a pointer to the contract, not a copy. */
+const HARNESS_REFERENCE = [
+  "## pi-minimal-harness instructions",
+  "* **Harness Rules:** Read pi-minimal-harness.md and strictly follow its guidelines for this project's harness.",
+  "* **Conflict Resolution:** If any rules in AGENTS.md conflict with pi-minimal-harness.md, the rules in AGENTS.md take precedence.",
+].join("\n");
+const [REFERENCE_HEADING, ...REFERENCE_BULLETS] = HARNESS_REFERENCE.split("\n");
 
 function usage() {
   return `Usage: pi-minimal-harness <command> [options]
 
 Commands:
   init     Install the pi-minimal-harness extension, prompts, delivery skill,
-           local config, and AGENTS.md contract into a project.
+           local config, the ${CONTRACT_FILE} contract and the AGENTS.md
+           reference to it into a project.
   update   Refresh an existing installation. Upstream-owned files (extension,
-           prompts, delivery skill, AGENTS.md contract) are replaced; missing
-           keys are added to harness.config.yaml. Existing values are never
-           overwritten and no key is ever removed.
+           prompts, delivery skill, ${CONTRACT_FILE}) are replaced; a pasted
+           AGENTS.md contract becomes a reference to the contract file, and
+           missing keys are added to harness.config.yaml. Existing values are
+           never overwritten and no key is ever removed.
 
 Options:
   --project <path>  Project directory (default: current directory)
@@ -111,7 +122,11 @@ async function copyFileIfAllowed(source, destination, options, report) {
 /** True for the files the harness owns, which an installation always has. */
 function harnessOwned(destination) {
   const relative = destination.split(path.sep).join("/");
-  return relative.includes("/.pi/extensions/harness.ts") || relative.includes("/prompts/");
+  return (
+    relative.includes("/.pi/extensions/harness.ts") ||
+    relative.includes("/prompts/") ||
+    relative.endsWith(`/${CONTRACT_FILE}`)
+  );
 }
 
 async function walkFiles(directory) {
@@ -341,73 +356,57 @@ async function mergeLocalConfig(source, destination, options, report) {
 }
 
 /**
- * The contract an adopting project receives: AGENTS-addition.md from the
- * "## Harness workflow" heading onward. Everything above that heading is
- * documentation for whoever reads the source file (the two adoption options,
- * how to re-sync it) and must not be injected into the project's AGENTS.md.
+ * The project's AGENTS.md gets a pointer to the contract, never a copy of it:
+ * the reference lines are appended once, inside the installer's markers, and a
+ * second run finds them and changes nothing. An installation that still carries
+ * the contract an older release pasted between those markers is migrated in
+ * place by `update`; anything the project wrote itself is left alone.
  */
-async function harnessContractText() {
-  const source = path.join(PACKAGE_ROOT, "AGENTS-addition.md");
-  const text = (await fs.readFile(source, "utf8")).trim();
-  const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^## Harness workflow\s*$/.test(line));
-  if (start === -1) {
-    throw new Error(
-      `AGENTS-addition.md has no "## Harness workflow" section; refusing to guess what the contract is.`,
-    );
-  }
-  return lines.slice(start).join("\n").trim();
-}
-
-/**
- * The contract an adopting project already carries, compared by content.
- * The markers are only one way to have it: the documented "paste it into your
- * AGENTS.md" path never writes them, so a section that already reads exactly
- * like this release's contract is a match. Text that differs belongs to the
- * project and is never rewritten, not even with --force.
- */
-function contractSectionPresent(current, contract) {
-  if (!/## Harness workflow\b/.test(current)) return false;
-  const lines = current.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^## Harness workflow\s*$/.test(line));
-  if (start === -1) return false;
-  const section = lines.slice(start).join("\n").trim();
-  return section === contract || section.includes(contract);
-}
-
-async function appendHarnessContract(project, options, report) {
+async function ensureHarnessReference(project, options, report) {
   const destination = path.join(project, "AGENTS.md");
-  const contract = await harnessContractText();
-  const block = `${HARNESS_BLOCK_START}\n${contract}\n${HARNESS_BLOCK_END}\n`;
+  const relative = path.relative(project, destination) || destination;
   let current = "";
   if (await pathExists(destination)) current = await fs.readFile(destination, "utf8");
+
+  if (REFERENCE_BULLETS.every((line) => current.includes(line)) && current.includes(REFERENCE_HEADING)) {
+    report.push(`unchanged ${relative} (harness reference already present)`);
+    return;
+  }
+  if (current.includes(REFERENCE_HEADING)) {
+    report.push(
+      `note ${relative} has a "${REFERENCE_HEADING}" section that differs from this release; left exactly as it is`,
+    );
+    return;
+  }
+
+  const block = `${HARNESS_BLOCK_START}\n${HARNESS_REFERENCE}\n${HARNESS_BLOCK_END}\n`;
   const start = current.indexOf(HARNESS_BLOCK_START);
   const end = current.indexOf(HARNESS_BLOCK_END);
-  if (start >= 0 && end >= start) {
+  if (start >= 0 && end > start) {
+    // A contract an older release pasted between the markers. Replacing the
+    // marked region is the one edit `update` is allowed to make here: the
+    // marker block is the harness's own, and the contract now lives in its
+    // own file, which the same run copies in.
     if (!options.force) {
-      report.push(`unchanged ${path.relative(project, destination) || destination} (harness contract already present)`);
+      report.push(
+        `note ${relative} carries a pasted harness contract: "npx pi-minimal-harness update" replaces it with the ${CONTRACT_FILE} reference`,
+      );
       return;
     }
     const updated = `${current.slice(0, start)}${block}${current.slice(end + HARNESS_BLOCK_END.length)}`;
-    report.push(`replace harness contract in ${path.relative(project, destination) || destination}`);
+    report.push(`replace the pasted harness contract in ${relative} with the ${CONTRACT_FILE} reference`);
     if (!options.dryRun) await fs.writeFile(destination, updated, "utf8");
     return;
   }
-  if (contractSectionPresent(current, contract)) {
-    report.push(`unchanged ${path.relative(project, destination) || destination} (harness contract already present, pasted without installer markers)`);
-    return;
-  }
-  if (/## Harness workflow\b/.test(current)) {
-    if (!options.force) {
-      report.push(`unchanged ${path.relative(project, destination) || destination} (existing harness workflow detected)`);
-      return;
-    }
-    throw new Error(
-      `${destination} has a "## Harness workflow" section that differs from this release. Refusing to edit it automatically: replace that section with the one in AGENTS-addition.md, or delete it and re-run.`,
+  if (/^##\s+Harness workflow\s*$/m.test(current)) {
+    // Pasted by hand, so it has no markers and its extent is the project's
+    // guess. Keep it, point at the contract as well, and say what it means.
+    report.push(
+      `note ${relative} carries a hand-pasted harness contract; it is kept and is superseded by ${CONTRACT_FILE}`,
     );
   }
   const updated = current ? `${current.trimEnd()}\n\n${block}` : block;
-  report.push(`${current ? "append harness contract to" : "create"} ${path.relative(project, destination) || destination}`);
+  report.push(`${current ? "append harness reference to" : "create"} ${relative}`);
   if (!options.dryRun) await fs.writeFile(destination, updated, "utf8");
 }
 
@@ -537,13 +536,19 @@ async function install(options) {
     options,
     report,
   );
+  await copyFileIfAllowed(
+    path.join(PACKAGE_ROOT, CONTRACT_FILE),
+    path.join(options.project, CONTRACT_FILE),
+    options,
+    report,
+  );
   await mergeLocalConfig(
     path.join(PACKAGE_ROOT, "harness.config.example.yaml"),
     path.join(options.project, "harness.config.yaml"),
     options,
     report,
   );
-  await appendHarnessContract(options.project, options, report);
+  await ensureHarnessReference(options.project, options, report);
   await ensureChangelog(options.project, options, report);
   await reportTemplatePlaceholders(path.join(options.project, "harness.config.yaml"), report);
   await addLocalConfigExclude(options.project, options, report);

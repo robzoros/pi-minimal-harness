@@ -371,23 +371,31 @@ export function isAllowDispatch(lines: string[]): boolean {
 // ---------------------------------------------------------------------------
 // The contract injected into a dispatch subagent is the only channel it gets,
 // so failing to find it must not be the price of a wrong guess. An adopting
-// project reaches it in one of two ways: it pastes the block into its
-// `AGENTS.md` (the installer does exactly that) or it keeps a separate file
-// and points at it. The pipeline steps do not depend on any of this: they get
-// the project's `AGENTS.md` through Pi's normal mechanism.
+// project reaches it in one of two ways: the installer copies the contract to
+// its root as `pi-minimal-harness.md` and points at it from `AGENTS.md`, or the
+// project keeps a contract of its own and points at that. The pipeline steps
+// do not depend on any of this: they get the project's `AGENTS.md` through
+// Pi's normal mechanism.
 //
 // Resolution is therefore a chain verified by existence, never "the first
 // configured one wins": a `defaults.subagent_context_file` that points at a
-// file no longer present — the normal state after a project pasted the block
-// and deleted the standalone file — falls through instead of breaking dispatch.
+// file no longer present — the normal state after a project replaced the key
+// with another file, or after deleting one it no longer uses — falls through
+// instead of breaking dispatch. The installer-written file comes before
+// `AGENTS.md` because `AGENTS.md` now carries a pointer, not the contract; a
+// legacy `AGENTS-addition.md` is still accepted as a last resort.
 const HARNESS_BLOCK_START = "<!-- BEGIN pi-minimal-harness -->";
+/** The contract the installer copies to the root of an adopting project. */
+const CONTRACT_FILE = "pi-minimal-harness.md";
+/** The name the same contract had before, still honoured for existing projects. */
+const LEGACY_CONTRACT_FILE = "AGENTS-addition.md";
 
 export interface ContractResolution {
   /** Absolute path of the file to inject, or null when none exists. */
   path: string | null;
   /** Absolute paths that were considered, in order. */
   candidates: string[];
-  /** Which step matched: "defaults.subagent_context_file", "AGENTS.md" or "AGENTS-addition.md". */
+  /** Which step matched: "defaults.subagent_context_file", "pi-minimal-harness.md", "AGENTS.md" or "AGENTS-addition.md". */
   source: string | null;
   /** A configured value that exists nowhere, worth warning about. */
   staleConfig: string | null;
@@ -398,8 +406,9 @@ function contractCandidates(cwd: string, configPath: string | undefined, lines: 
   const candidates: Array<{ source: string; file: string }> = [];
   const configured = getDefaultString(lines, "subagent_context_file", "");
   if (configured) candidates.push({ source: "defaults.subagent_context_file", file: configured });
+  candidates.push({ source: CONTRACT_FILE, file: CONTRACT_FILE });
   candidates.push({ source: "AGENTS.md", file: "AGENTS.md" });
-  candidates.push({ source: "AGENTS-addition.md", file: "AGENTS-addition.md" });
+  candidates.push({ source: LEGACY_CONTRACT_FILE, file: LEGACY_CONTRACT_FILE });
   return candidates.map((candidate) => ({
     source: candidate.source,
     file: path.isAbsolute(candidate.file) ? candidate.file : path.join(base, candidate.file),
@@ -408,9 +417,10 @@ function contractCandidates(cwd: string, configPath: string | undefined, lines: 
 
 /**
  * Find the contract to inject into dispatched subagents: the configured file
- * when it exists, then an `AGENTS.md` that carries the harness block, then a
- * standalone `AGENTS-addition.md`. A configured file that exists nowhere is
- * reported as stale instead of failing the resolution.
+ * when it exists, then the `pi-minimal-harness.md` the installer copies, then
+ * an `AGENTS.md` that carries the harness block, then a legacy
+ * `AGENTS-addition.md`. A configured file that exists nowhere is reported as
+ * stale instead of failing the resolution.
  */
 export function resolveContractPath(lines: string[], configPath?: string, cwd?: string): ContractResolution {
   const considered = contractCandidates(cwd, configPath, lines);

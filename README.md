@@ -70,20 +70,29 @@ your-project/
 │   └── harness/                # optional: extra design notes
 ├── tests/
 │   └── harness.test.mjs        # optional but recommended
-└── AGENTS.md                   # add the section from AGENTS-addition.md
+├── pi-minimal-harness.md       # the harness contract (AGENTS.md points at it)
+└── AGENTS.md                   # your rules + the reference to the contract
 ```
 
 **Steps:**
 
 1. Copy the files above.
-2. **Paste `AGENTS-addition.md` into your project's `AGENTS.md`** (or reference
-   it / use `.pi/APPEND_SYSTEM.md` — the two options are explained at the top
-   of that file). Only the section from `## Harness workflow` onward belongs in
-   `AGENTS.md`; the preamble is for whoever reads the file. Dispatched
-   subagents get their contract from the first file that exists, in this order:
-   `defaults.subagent_context_file`, an `AGENTS.md` that carries the harness
-   block, then a standalone `AGENTS-addition.md`. Leave the key unset and every
-   variant works, including one that deletes the standalone file after pasting.
+2. **Point your project's `AGENTS.md` at `pi-minimal-harness.md`** by adding
+   the reference the installer writes (or let `npx pi-minimal-harness init`
+   write it for you):
+
+   ```markdown
+   ## pi-minimal-harness instructions
+   * **Harness Rules:** Read pi-minimal-harness.md and strictly follow its guidelines for this project's harness.
+   * **Conflict Resolution:** If any rules in AGENTS.md conflict with pi-minimal-harness.md, the rules in AGENTS.md take precedence.
+   ```
+
+   The contract is a file of its own, not a section pasted into `AGENTS.md`:
+   `update` replaces it wholesale, and a paste would be lost on the next
+   upgrade. Dispatched subagents get it from the first file that exists, in this
+   order: `defaults.subagent_context_file`, `pi-minimal-harness.md`, an
+   `AGENTS.md` that carries the harness block, then a legacy
+   `AGENTS-addition.md`. Leave the key unset and every variant works.
 3. Edit `harness.config.yaml`: set `project:`, pick models **from Pi's
    `/models` output** (never invent IDs), set each agent's supported reasoning
    effort, and set `defaults.workflow_mode`.
@@ -228,8 +237,8 @@ and prompts, then `/harness-config` to review and validate the configuration.
   itself must be installed separately; when it is not on your `PATH`, set
   `ENGRAM_BIN` to its absolute path instead. Normally you do not need to run
   `engram serve`: Engram starts it on demand. Use `--force` to replace an
-  existing Engram MCP entry. See [`AGENTS-addition.md`](AGENTS-addition.md) for
-  the memory protocol.
+  existing Engram MCP entry. See [`pi-minimal-harness.md`](pi-minimal-harness.md)
+  for the memory protocol.
 
   The adapter reads its own `~/.pi/agent/mcp-adapter.json`
   (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows). Helper versions that
@@ -286,9 +295,8 @@ defaults:
   question_short_circuit: true   # orchestrator's ANSWER_ONLY stops the pipeline
   allow_dispatch: true           # enable the harness-dispatch tool
                                    # subagent contract: defaults.subagent_context_file
-                                   # if it exists, else an AGENTS.md carrying the
-                                   # harness block, else a standalone
-                                   # AGENTS-addition.md
+                                   # if it exists, else pi-minimal-harness.md,
+                                   # else an AGENTS.md carrying the harness block
   strict_decision_marker: true   # stop when the orchestrator emits no decision
   preflight_policy: advisory     # advisory | blocking (blocking gates file-mutating steps)
 workflows:
@@ -378,9 +386,9 @@ until needed.
 
 ## Documentation map
 
-- [`AGENTS-addition.md`](AGENTS-addition.md) — the contract you add to your
-  project's `AGENTS.md` (harness rules, memory, CodeGraph, verification,
-  skills) and the two adoption strategies.
+- [`pi-minimal-harness.md`](pi-minimal-harness.md) — the contract installed
+  in your project (harness rules, memory, CodeGraph, verification, skills);
+  your `AGENTS.md` only points at it and wins any conflict.
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md) — agent roles, modes and the
   configuration shape in depth.
 - [`docs/DISPATCH-PLAN.md`](docs/DISPATCH-PLAN.md) — background dispatch design

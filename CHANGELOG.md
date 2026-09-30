@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The contract is now a standalone file, `pi-minimal-harness.md`, instead of a
+  section pasted into the adopting project's `AGENTS.md`. `init` and `update`
+  copy the file to the project root and add a reference to `AGENTS.md` instead
+  of a copy of the contract, if it is not there already:
+
+  ```markdown
+  ## pi-minimal-harness instructions
+  * **Harness Rules:** Read pi-minimal-harness.md and strictly follow its guidelines for this project's harness.
+  * **Conflict Resolution:** If any rules in AGENTS.md conflict with pi-minimal-harness.md, the rules in AGENTS.md take precedence.
+  ```
+
+  A paste is lost on the next upgrade; a file of its own is replaced by
+  `update` and stays diffable, and the reference states the precedence rule
+  instead of leaving both texts to be reconciled by the agent. The file's
+  preamble — the two adoption options and how to re-sync — is now commented
+  out and rewritten for the new arrangement, because there is no longer a
+  section to take out of it. An installation that still carries the pasted
+  block between the installer markers is migrated in place by `update` (a
+  hand-pasted contract has no markers, so it is kept and the reference is added
+  next to it); anything else in `AGENTS.md` is never rewritten, so a hand-written
+  or hand-edited reference is left exactly as it is. Contract resolution for
+  dispatched subagents follows the new order: `defaults.subagent_context_file`
+  when it resolves, `pi-minimal-harness.md`, an `AGENTS.md` carrying the
+  harness block, and finally a legacy `AGENTS-addition.md`, so projects
+  installed before the rename keep dispatching.
+
 ### Fixed
 
 - Dispatch was broken for the recommended way to adopt the contract. The
