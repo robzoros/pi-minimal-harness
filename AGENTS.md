@@ -1,120 +1,112 @@
 # AGENTS.md — pi-minimal-harness
 
-Operating contract for agents working **in this repository**, the source of the
-`pi-minimal-harness` project: a minimal, configuration-driven agent harness for
-the Pi coding agent, published for use in other people's projects.
+The operating contract for agents working **in this repository**: the source of
+`pi-minimal-harness`, a configuration-driven agent harness published for other
+projects.
 
-## What this repository contains
+**Read `pi-minimal-harness.md` for the contract itself.** This file is about
+working on the harness, not about using it.
+
+## What is here
 
 | Path | Purpose |
 |---|---|
-| `README.md` | Public front door: inspiration, install, configuration, commands, skills. |
-| `pi-minimal-harness.md` | The generic harness contract, copied verbatim to the root of every adopting project and pointed at from their `AGENTS.md`. |
-| `harness.config.yaml` | Single source of truth: `defaults` (mode, auto-harness, short-circuit, dispatch gate, contract file), `commands`, `workflows` (mode → agent steps), `agents` (model, reasoning, tools, prompt template), `skills`. |
-| `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool. |
-| `prompts/` | Per-agent prompt templates referenced by `harness.config.yaml`. |
-| `.agents/skills/github-delivery/` | The shipped project skill (branch → commit → push → PR). |
-| `docs/WORKFLOW.md`, `docs/DISPATCH-PLAN.md` | Design documentation (roles/modes/config shape; background dispatch plan). |
-| `tests/harness.test.mjs` | Node smoke test: `node tests/harness.test.mjs`. |
-| `CHANGELOG.md`, `LICENSE` | Keep a Changelog + MIT. |
+| `pi-minimal-harness.md` | The contract. Copied verbatim to every adopting project |
+| `harness.config.yaml` | This project's own v2 configuration. `harness.config.example.yaml` is the template `init` ships |
+| `.pi/extensions/harness.ts` | The extension entry point: commands, hooks, footer. Thin by design |
+| `.pi/extensions/lib/` | The harness proper — see below |
+| `prompts/` | Six role prompts. Identity and method only |
+| `.agents/skills/github-delivery/` | The shipped delivery skill |
+| `MIGRATION.md` | How a v1 project moves to v2 |
+| `tests/` | Node test suites, no framework, no dependencies |
 
-There is **no** `package.json` and no `src/`: the adopting application's
-lint/test/cargo gates do not apply here. A git repository exists but has no
-commits or remote yet (delivery requires deciding `.gitignore` policy first).
+## The shape of the system
 
-## How the harness works
+The runtime is a **state machine**, not an agent. `lib/transitions.ts` is the
+single source of truth for control flow, and it is pure data.
 
-- A workflow mode selects an ordered list of agent steps (`workflows.<mode>`).
-- For each step the extension switches to that agent's model and reasoning level,
-  renders `prompts/<agent>.md` as a short pointer (template bodies never enter
-  the transcript) and sends it as the next turn; the runtime sequences the
-  steps, so the model cannot skip them.
-- The orchestrator declares its decision with the `harness_decision` tool, once
-  at the end of its turn: `ANSWER_ONLY` for questions and tasks that change no
-  files (the pipeline stops after the first step) or `PIPELINE` when files must
-  change. The textual marker `HARNESS-DECISION:` on the last line remains a
-  fallback; the tool wins when both are present. The marker counts only on the
-  last non-empty line, and both variants on that line are ambiguous.
-  `defaults.strict_decision_marker` makes a turn with no usable decision stop
-  the pipeline instead of reading its absence as `PIPELINE`.
-- `defaults.auto_harness` sends plain (non-slash) requests through the pipeline;
-  `defaults.question_short_circuit` enables the orchestrator's early exit.
-- The driver checks every step's report: a complete `harness_report` call
-  (`changed_files`, `checks`, `notes`, `lessons` all present, `[]` for a
-  genuinely empty one) satisfies it, and the textual marker `HARNESS-DONE` is
-  the fallback — it cannot be inspected, so it always counts. A missing or
-  incomplete report gets exactly one repair turn for that step, naming the
-  missing field, and stops the pipeline if it is still incomplete. A direct
-  answer (`ANSWER_ONLY`) needs no report and is never repaired. A report the
-  orchestrator happened to send is cleared before the next step, so it can
-  never stand in for that step's own report.
-- The orchestrator's `HARNESS-DECISION` marker is stripped from the reply and
-  shown in the footer instead (`decision: …`). For questions the footer ends at
-  `1/1 <agent>`; during step 1 the total is shown only once the decision is known.
-- The `harness-dispatch` tool runs independent tasks in isolated `pi`
-  subprocesses with a curated brief; gated by `defaults.allow_dispatch` and by
-  the subagent contract, resolved by existence in this order:
-  `defaults.subagent_context_file` when it resolves, `pi-minimal-harness.md`,
-  an `AGENTS.md` carrying the harness block, then a legacy `AGENTS-addition.md`
-  (see `docs/DISPATCH-PLAN.md`).
-- The control tools `harness_decision` and `harness_report` record the pipeline's
-  control flow. Their state is captured in their own `execute`, which runs after
-  the `message_end` hook — so the tool must assign unconditionally and the hook
-  only when empty, or the textual fallback would win. They are inert outside a
-  pipeline.
-- The `harness_report` tool carries a `lessons` field: the findings the step
-  also saves with `mem_save`. The driver validates presence, not content
-  (`reportGaps`), so `[]` is the way to say "nothing" and an omitted field is
-  what earns a repair turn.
-- Exploration and memory are reachable in every mode, not only in `full`:
-  `codegraph` is granted to the `orchestrator`, `explorer` and `implementer`,
-  and `engram` to the same three, and the prompt templates name both. A grant
-  is declarative, so a runtime without the tool degrades to the `grep`/`rg`
-  fallback the templates describe instead of failing.
-- The repository preflight reads `defaults.preflight_policy`: `advisory` only
-  reports, `blocking` stops the first agent marked `mutates_files: true` when
-  the tree is dirty or a pull request is open — asked once with a TUI, blocked
-  with an error without one. Agents without the field are assumed to mutate
-  files, so validation lists them.
-- Memory is provided by the user-level `gentle-engram` Pi package together with
-  `pi-mcp-adapter` (`~/.pi/agent/mcp-adapter.json`, or
-  `%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows — that is the adapter's
-  own config; the legacy `mcp.json` beside it is Pi's —
-  `engram mcp --tools=agent`): it owns
-  session registration, passive capture, the `mem_*` tools, the injected Memory
-  Protocol, compaction recovery and `<private>` redaction. The harness neither
-  gates nor duplicates it; project detection comes from the server's
-  `/project/current`.
+```
+START → PLANNING ─┬─ complete ────────────────► DONE
+                  ├─ ready_for_approval ──► SUSPENDED ─┬─ approve ──► EXPLORING
+                  ├─ needs_input ─────────► SUSPENDED ─┬─ revise ──► PLANNING
+                  └─ failed ───────────────► SUSPENDED ─┴─ answer ──► where it was
+EXPLORING → IMPLEMENTING → REVIEWING → TESTING → DELIVERING → DONE
+                                ▲              │             │
+                                └──────────────┴─────────────┘   retry budget, shared
+```
 
-## Core rules
+Two rules the table enforces, and which no prompt can override:
 
-- Change the harness only through `harness.config.yaml` and the extension; keep
-  one source of truth and do not duplicate mode/agent definitions across files.
-- **Keep the published surface generic**: no target-application specifics (other
-  projects' tech stack, product rules, languages) in `README.md`,
-  `pi-minimal-harness.md`, `prompts/`, `.agents/skills/` or the config.
-- No new npm dependencies in the extension; keep the indentation-aware YAML
-  editing so user formatting is preserved.
-- The extension must keep working in non-interactive modes: guard terminal-only
-  UI behind `ctx.mode === "tui"` / `ctx.hasUI`.
-- Any process spawn must work on Windows, macOS and Linux.
-- Prefer small, focused edits and preserve existing behavior that has tests.
-- Documentation in English; user-facing strings may be Spanish.
+- **No agent result moves the workflow past `PLANNING`.** The planner declares
+  a plan ready; the user approves it. The approval is a user event.
+- **An agent cannot choose its successor.** The result envelope has a closed
+  shape and unknown fields are rejected by name.
 
-## Verification
+## The modules
 
-- The extension is validated by the in-repo smoke test `tests/harness.test.mjs`,
-  which imports `.pi/extensions/harness.ts`, drives the registered
-  commands/events/tool with fakes and asserts the pipeline, status text,
-  short-circuit, per-step report guarantee, decision handling (including the
-  strict decision marker and the blocking preflight), validation and the
-  dispatch seams. Run it after every extension change (`node tests/harness.test.mjs`)
-  and report pass/fail counts; the test re-runs itself with
-  `--experimental-strip-types` on Node releases before 22.18.
-  `node tests/install.test.mjs` covers the installer. Both must pass on Windows,
-  macOS and Linux: never assume a Posix-only path such as `/tmp`.
-- Inspect the changed regions (git exists: confirm with `git status`/reads and
-  by confirming no unintended file changed).
-- TUI end-to-end requires `/reload` in an interactive Pi session; report it as
-  not run when you cannot do it.
-- Mention every check that could not be run and why.
+| Module | Owns | Knows nothing about |
+|---|---|---|
+| `transitions.ts` | Every rule about control flow | Files, processes, models |
+| `state.ts` | Applying a signal to a state | I/O |
+| `result.ts` | The envelope: shape, per-phase verdicts | Agents |
+| `escalation.ts` | Which doubts the runtime settles, which reach the user | Anything but topic names |
+| `brief.ts` | The context one agent receives | The machine |
+| `runner.ts` | Spawning a `pi` process, retries on failure | Workflow phases |
+| `capabilities.ts` | Capability → Pi tool names | Agents, configuration |
+| `config.ts` / `validate.ts` | Reading and checking the configuration | Everything else |
+| `requirements.ts` / `changelog.ts` | The traceability chain | Agents |
+| `suspend.ts` | Why a workflow stopped, and where it resumes | Why |
+| `driver.ts` | The loop that ties the rest together | — |
+
+The dependency direction is one-way: `driver → everything → transitions`.
+Nothing in `lib/` imports `harness.ts`, and nothing imports Pi except a type
+annotation.
+
+## Language
+
+Agents talk to **each other in English**, always — a brief written in two
+languages is a worse brief. What the user reads is in their language: the
+status line, the question a workflow asks, the notifications. The single
+exception inside the envelope is the question, because the user reads that one.
+
+## Verifying a change
+
+```bash
+npm test
+```
+
+Seven suites, no framework, no network, no model. Every command must be bounded:
+a suite that spawns processes or contains a manual scan **will hang forever**
+rather than fail, and a test that only reads strings will not notice a broken
+extension.
+
+Two suites exist because of shipped bugs:
+
+- `tests/extension.test.mjs` imports `.pi/extensions/harness.ts` the way Pi
+  does. Without it, a syntax error in the entry point ships with the whole suite
+  green — it happened once, and Pi refused to load the extension.
+- `tests/prompts.test.mjs` asserts that no prompt or contract restates runtime
+  behaviour. A prompt that mentions a field name, a phase or a config key puts
+  two sources of truth back into the project.
+
+New modules get tests. **A new module with no test that imports it will break
+in production, silently.**
+
+## Rules
+
+- The behaviour of the machine lives in `transitions.ts`. If a rule needs prose,
+  it needs a row and a check, not a paragraph.
+- Config keys are read or they are deleted. A key nothing reads is worse than
+  absent: it looks enforced.
+- Nothing outside `lib/` decides anything the machine should decide.
+- Do not copy logic between the extension, the contract, the prompts and the
+  README. Pick the layer and link.
+- No new dependencies. The installer ships to other people's machines and the
+  extension loads inside Pi.
+- Documentation in English; user-facing strings follow the user.
+
+## Before committing
+
+`npm test` in green, `git status` showing only what you intended, and any check
+you could not run stated plainly. TUI behaviour cannot be verified without
+`/reload` in an interactive session — say so rather than implying it was tested.

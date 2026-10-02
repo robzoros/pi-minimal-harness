@@ -22,110 +22,156 @@ installs, so a local edit would be lost. `.pi/APPEND_SYSTEM.md` (project-level,
 added to Pi's system prompt; requires project trust) is still available for a
 project that wants standing rules injected without a read.
 
-Dispatched subagents (the `harness-dispatch` tool) receive this file as their
-contract, resolved by existence in this order: `defaults.subagent_context_file`
-when it is set and resolves, this `pi-minimal-harness.md`, an `AGENTS.md`
-carrying the harness block, and finally a legacy `AGENTS-addition.md`. The
-pipeline steps do not depend on that chain at all: they get the project's
-`AGENTS.md` through Pi's normal mechanism, and the reference section above tells
-them to read this file.
+Every agent the harness runs receives this file as its contract, resolved by
+existence in this order: `subagent_context_file` when it is set and resolves,
+this `pi-minimal-harness.md`, an `AGENTS.md` carrying the harness block, and
+finally a legacy `AGENTS-addition.md`. If none exists, the harness reports it
+rather than running an agent without rules.
 -->
 
 ---
 
-## Harness workflow
+## What the harness is
 
-- Work is executed through the `pi-minimal-harness` pipeline. A workflow mode
-  selects an ordered list of agent steps; the runtime sequences them, so steps
-  cannot be skipped. Modes: `simple`, `full-dry-run`, `full`,
-  `implementation-only`, `delivery-only` (see `defaults.workflow_mode`).
-- Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
-  supported reasoning effort), `/harness-run <task>`, `/harness-delivery
-  [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
-  delivery agent without changing `defaults.workflow_mode`.
-- The orchestrator declares its decision with the `harness_decision` tool, once
-  at the end of its turn: `ANSWER_ONLY` (questions and tasks that change no
-  files — the pipeline stops) or `PIPELINE` (files must change), with a one-line
-  `reason`. Without the tool, the fallback is one marker on the last line:
-  `HARNESS-DECISION: ANSWER_ONLY` or `HARNESS-DECISION: PIPELINE`. The harness
-  moves the decision to the footer; it is not part of the visible answer. With
-  `defaults.strict_decision_marker` on, a turn with no usable decision stops the
-  pipeline instead of assuming `PIPELINE`.
-- Every non-orchestrator agent writes a report in the form `### Changes` /
-  `### Evidence` / `### Notes for delivery` / `### Lessons` **and** calls
-  `harness_report` with `changed_files`, `checks`, `notes` and `lessons`.
-  Without the tool, the fallback is `HARNESS-DONE` as the last line. All four
-  fields are required and `[]` is how a field with nothing in it is passed, so
-  an omitted field is an incomplete report: the harness sends one repair turn
-  for that step, naming the missing field, and stops if it is still
-  incomplete.
-- Reports are evidence-based: name the files changed, the checks actually run,
-  and every check that could not be run.
-- Explore before editing. The agents are granted CodeGraph and Engram for
-  that: ask CodeGraph who calls a shared symbol before changing it (falling
-  back to `grep`/`rg` when it is unavailable or stale), and save what is worth
-  reusing with `mem_save` — root causes, gotchas, discoveries, configuration
-  changes — not a log of routine steps. A tool that is absent from the runtime
-  is skipped, never fatal.
-- The harness performs a repository preflight before a pipeline. Warn the user
-  about uncommitted changes, branch divergence, or an open pull request; do not
-  claim the repository is clean when it is not. With
-  `defaults.preflight_policy: blocking` a dirty tree or an open pull request
-  stops the first step whose agent is marked `mutates_files: true`.
+Work runs through a pipeline of specialised agents.
 
-## Memory — Engram
+The pipeline is a state machine in the harness runtime, not an agent. It decides
+which agent runs next, gives that agent only the context that agent needs, reads
+what comes back, and moves on. Nobody decides the next step by opinion.
 
-Recommended packages (user-level): `gentle-engram` plus `pi-mcp-adapter`, with
-`engram mcp --tools=agent` registered in the adapter's own
-`~/.pi/agent/mcp-adapter.json` (not the legacy `mcp.json`, whose `mcpServers`
-may belong to Pi). Memory is local-first (SQLite + FTS5) and shared across
-sessions and agents.
+Each agent runs as its own process with its own context. What an agent was not
+told, it does not know — so the harness assembles every context deliberately
+rather than passing a conversation along.
 
-- **Save** durable learnings right after: bugfix, architecture/design
-  decision, non-obvious discovery, configuration/setup, established pattern, or
-  user preference. Format content as **What** / **Why** / **Where** /
-  **Learned**; keep titles short; reuse a `topic_key` to evolve a topic instead
-  of duplicating it.
-- **Search** before repeating work: `mem_context` for recent history, then
-  `mem_search` for keywords, then fetch the full observation only if needed.
-- **Before ending a session**, save a session summary (Goal, Instructions,
-  Discoveries, Accomplished, Next Steps, Relevant Files).
-- Do **not** store raw command transcripts, tool output dumps, or facts already
-  documented in the repository.
+Two consequences follow, and they hold everywhere below:
 
-## Structural exploration — CodeGraph
+- **Nothing here is the enforcement.** If a rule is not checked by the runtime,
+  it is guidance. The runtime enforces sequencing, the retry budget, the result
+  contract, the requirements file, the changelog gate and the repository
+  preflight. It does not enforce good judgement, and no prompt claims to.
+- **Project rules win.** `AGENTS.md` beats this file, every time, including
+  where they disagree.
 
-- Use CodeGraph **selectively**, only when relationships matter (callers,
-  callees, impact, affected tests). For simple changes, read the source
-  directly.
-- The index lives at the repository root in `.codegraph/` and is **local
-  state**: never commit it. Whether any ignore file needs tracking is up to
-  the project's own rules — if the whole directory is already ignored, there
-  is nothing to add.
-- Useful commands: `codegraph init --cwd <root>`, `codegraph status`,
-  `codegraph sync --cwd <root>`, `codegraph explore`, `codegraph callers`,
-  `codegraph callees`, `codegraph impact`, `codegraph affected`.
-- If the index does not exist or is stale, initialize or sync it before
-  relying on results.
+## The agents
 
-## Verification
+Six roles, in the order the happy path runs them.
 
-Before considering a task complete:
+| Role | Owns | Never |
+|---|---|---|
+| **Planner** | The requirements file. Understanding the request, finding ambiguity, putting the plan to the user | Touches source, tests or configuration |
+| **Explorer** | The technical context: where the work lives, what depends on it, what could break | Modifies anything |
+| **Implementer** | All code changes. Repository state, the issue, the working branch, the changelog | Merges, releases, approves its own work |
+| **Reviewer** | Whether the change is correct, and traceable to a requirement | Fixes anything — editing destroys the only independent check |
+| **Tester** | Whether the work meets its acceptance criteria | Fixes anything, and never contacts the implementer directly |
+| **Deliverer** | Whether delivery is ready, and then the branch, commits and pull request | Merging, accepting the result, and delivering around a blocker |
 
-- inspect the relevant diff;
-- run the project's own checks (focused checks for the touched area, broader
-  ones when shared behavior changes);
-- mention every check that could not be run and why;
-- summarize completion in terms of changed files and evidence.
+**Exactly two roles can write files, and each owns one thing.** The planner
+writes the requirements file and nothing else; the implementer writes code and
+changelog and neither.
+
+That is a capability boundary, not a sandbox. Both roles hold the same write
+tools, and those tools cannot be restricted to a path, so nothing stops the
+implementer from touching the requirements file. What actually keeps them apart
+is the role boundary above, the rule that a change nobody asked for is a
+finding, and a review that traces every change to a requirement. Treat the
+requirements file as owned by the planner in practice, and treat a breach as a
+defect to catch, not one the harness prevents.
+
+## Requirements
+
+The requirements file is the source of truth for what the work must achieve.
+Requirements carry stable identifiers, `REQ-001` and upwards, and each has a
+status and acceptance criteria specific enough for somebody else to verify.
+
+- **Only the planner writes it.** It creates requirements during planning and
+  updates them until the plan is approved.
+- **No other agent edits it.** Any other agent that finds a contradiction, a
+  gap or a requirement that turns out to be wrong reports it, and the workflow
+  takes it to the user.
+- A requirement is only delivered when its change, its review and its check all
+  exist. The harness will not let a delivery claim otherwise.
+
+Traceability runs one way, and each link has an owner:
+
+```
+requirement → change → review → check → delivery
+```
+
+## The changelog
+
+The changelog is kept by the workflow, not by whoever feels like it.
+
+- **The implementer is the only agent that writes it**, for the behaviour its
+  changes introduce, in the project's own format and under its own unreleased
+  heading.
+- **The deliverer verifies it**, and refuses to deliver when a delivered
+  requirement is not cited in that section. The citation is what ties "we
+  changed behaviour" to "we said why".
+
+## Asking instead of guessing
+
+When an agent finds something it cannot decide alone — scope, requirements,
+behaviour, architecture, strategy, acceptance criteria — it does not choose. It
+returns a structured request for information, and the workflow stops, puts the
+question to the user, and carries the answer back to the agent that asked.
+
+This is not a failure path. An agent that guesses here produces work that looks
+finished and is not, which costs more than a question. A blocked agent with a
+precise question is behaving correctly.
+
+## Replying
+
+Every agent replies with a single JSON object and nothing else, in the form the
+harness injects into its instructions. The harness reads that object, validates
+it, and ignores prose outside it — so prose around the object is discarded.
+
+**The object has a closed shape.** A field that is not part of the contract is
+an error, not something to ignore: the harness names it back. An agent cannot
+name its own successor, choose the next step, or smuggle anything else through
+here. Only the harness decides what runs next.
+
+A `status` says what happened in your step. A `verdict` is a judgement about
+someone else's work, and only the three reviewing roles return one, with values
+that belong to their role and to no other.
+
+**The object is English.** Agents talk to each other in English: the summary,
+the findings and the checks in one object are read by the next agent, and a
+brief written in two languages is a worse brief.
+
+There is exactly one exception. The question is the one field the user reads
+rather than another agent, so write it in the language the user is using. The
+same applies to whatever reaches the user at the end of a run — the delivery,
+and anything the harness itself says. The enumerated values and identifiers
+stay in one language so the harness can read them.
+
+If the object cannot be produced, the agent gets one more turn with the
+specific problems named; if it still cannot, the workflow stops and says so.
+
+## Working methods
+
+**Explore before editing.** When relationships matter — who calls this, what a
+change affects — structural exploration answers that directly. If it is
+unavailable, search the repository instead. Either way, say which you used. A
+local change nothing imports needs no impact analysis.
+
+**Record what is worth reusing.** After a bug fix, an architecture decision, a
+non-obvious discovery, a configuration change or an established pattern, save a
+short entry: what, why, where, and what surprised you. Findings, not a log of
+what you read. Search before repeating work. Do not store raw command output or
+anything the repository already documents. If memory tools are absent, the same
+findings belong in the agent's summary.
+
+**Never claim a check you did not run.** Report what you ran, with its real
+outcome, and list what you could not run and why. An unreported gap is worse
+than a reported one.
 
 ## Project skills
 
-- Reusable procedures live in `.agents/skills/<name>/SKILL.md` with `name` and
-  `description` frontmatter.
-- Skills are invoked automatically when the task matches their description, or
-  explicitly with `/skill:<name>`.
-- A skill the agent config declares must exist in this project: if a delivery
-  step lists a skill, verify `.agents/skills/<name>/SKILL.md` is present before
-  relying on it, and say so when it is not.
-- Create a new skill only for a recurring procedure that has safety or
-  ordering constraints, or that encodes project-specific conventions.
+Reusable procedures live in the project's skills directory, with a name and a
+description in their front matter. They apply when the task matches, and they
+can be invoked explicitly.
+
+A skill an agent is told to rely on must exist in this project. Verify it is
+there before relying on it, and say so when it is not. Write a new skill only
+for a procedure that recurs, has ordering or safety constraints, or encodes
+project conventions nobody could guess.

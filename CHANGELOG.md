@@ -7,241 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [2.0.0]
 
-- Exploration and memory are now reachable in every workflow mode instead of
-  only in `full`. `codegraph` is granted to the `implementer` and to the
-  `orchestrator` (which runs in every mode), not only to the `explorer` that
-  `simple`, `implementation-only` and `delivery-only` never reach, and the
-  `orchestrator`, `explorer` and `implementer` templates instruct the agent to
-  record what is worth reusing with `mem_save` — root causes, gotchas,
-  non-obvious discoveries, configuration changes — instead of leaving the
-  Engram grant as a permission with nothing pointing at it. The implementer
-  also has to identify who depends on a symbol *before* editing it, with the
-  CodeGraph caller/impact information as the preferred mechanism and `grep`/`rg`
-  as the fallback when CodeGraph is unavailable or its index is stale; a local,
-  obviously unreferenced change is exempt. Grants are declarative and the
-  wording degrades gracefully, so a project without those servers installed
-  still runs. The contract file, `README.md` and `AGENTS.md` state both rules.
-- `harness_report` takes a `lessons` field: the findings a step also saved with
-  `mem_save`, shown in the `### Lessons` section every report template asks
-  for. All four fields are required, and `[]` is how a field with nothing in it
-  is passed, so an omitted or blank field is an incomplete report. The driver
-  treats it exactly like a missing report: one repair turn for that step,
-  naming the field it is missing, and the pipeline stops if the report is
-  still incomplete after it. The uninspectable `HARNESS-DONE` marker still
-  counts as complete.
-
-### Fixed
-
-- A `harness_report` call made during the orchestrator's turn satisfied the
-  report guarantee of the *next* step, so a step that reported nothing was
-  taken as reported. The report is now cleared after step 1, which is exempt
-  from the guarantee anyway.
-
-### Changed
-
-- The contract is now a standalone file, `pi-minimal-harness.md`, instead of a
-  section pasted into the adopting project's `AGENTS.md`. `init` and `update`
-  copy the file to the project root and add a reference to `AGENTS.md` instead
-  of a copy of the contract, if it is not there already:
-
-  ```markdown
-  ## pi-minimal-harness instructions
-  * **Harness Rules:** Read pi-minimal-harness.md and strictly follow its guidelines for this project's harness.
-  * **Conflict Resolution:** If any rules in AGENTS.md conflict with pi-minimal-harness.md, the rules in AGENTS.md take precedence.
-  ```
-
-  A paste is lost on the next upgrade; a file of its own is replaced by
-  `update` and stays diffable, and the reference states the precedence rule
-  instead of leaving both texts to be reconciled by the agent. The file's
-  preamble — the two adoption options and how to re-sync — is now commented
-  out and rewritten for the new arrangement, because there is no longer a
-  section to take out of it. An installation that still carries the pasted
-  block between the installer markers is migrated in place by `update` (a
-  hand-pasted contract has no markers, so it is kept and the reference is added
-  next to it); anything else in `AGENTS.md` is never rewritten, so a hand-written
-  or hand-edited reference is left exactly as it is. Contract resolution for
-  dispatched subagents follows the new order: `defaults.subagent_context_file`
-  when it resolves, `pi-minimal-harness.md`, an `AGENTS.md` carrying the
-  harness block, and finally a legacy `AGENTS-addition.md`, so projects
-  installed before the rename keep dispatching.
-
-### Fixed
-
-- Dispatch was broken for the recommended way to adopt the contract. The
-  installer pastes the block into the project's `AGENTS.md`, so a project that
-  keeps no standalone `AGENTS-addition.md` had no contract to inject, and every
-  `harness-dispatch` call threw `subagent_context_file not found` — with
-  `allow_dispatch: true` and the agent's own instructions authorising the call —
-  while `/harness-config` showed the same failure in red. Neither adoption
-  option in `AGENTS-addition.md` mentioned it, because the two options are not
-  equivalent. The contract is now resolved by **existence**, in order:
-  `defaults.subagent_context_file` when it resolves, an `AGENTS.md` carrying the
-  `<!-- BEGIN pi-minimal-harness -->` block, then a standalone
-  `AGENTS-addition.md`. A configured key whose file was deleted falls through
-  instead of failing, which is the state every pasted-contract project is left
-  in after an update, since the additive config merge never removes the key. A
-  key that resolves nowhere is reported on its own `/harness-config` check so
-  the fallback is visible rather than silent.
-- The installer injected the whole of `AGENTS-addition.md` into the adopting
-  project's `AGENTS.md`, including the preamble that documents the two
-  adoption options and how to re-sync the file — documentation for whoever
-  reads the source file, addressed to the agent. The pasted block now starts at
-  `## Harness workflow`; a missing heading is a hard error rather than a
-  silent full-file paste.
-- The contract told agents to keep a tracked `.gitignore` inside `.codegraph/`,
-  which is unexecutable for a project whose ignore rules already cover the
-  directory, and promised that "this harness ships `github-delivery`" as a fact
-  about any adopting project. The index is now described as local state that
-  must not be committed, with the ignore file left to the project's own rules,
-  and a declared skill is something to verify rather than assume.
-
-- The Engram setup instructions told the reader to run `pi-engram init` as a
-  bare command. It is never on the `PATH`: `pi install` keeps package shims in
-  npm's private `node_modules/.bin`, which npm only exposes to scripts run
-  inside that package. The README now shows the three invocations that work
-  (bash, PowerShell and plain `node cli.js`), explains why the shim is not on
-  the `PATH`, warns against `npx pi-engram` (the package is `gentle-engram`;
-  the binary is only its name), and points at `ENGRAM_BIN` when the Engram
-  binary itself is not on the `PATH`.
-- The documentation named `~/.pi/agent/mcp.json` as the file where the
-  `pi-mcp-adapter` integration registers its servers. That is the legacy file,
-  and its `mcpServers` may be owned by Pi's built-in MCP; the adapter's own
-  config is `~/.pi/agent/mcp-adapter.json`
-  (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows). `README.md`,
-  `AGENTS.md` and `AGENTS-addition.md` now point at the adapter file, and the
-  README explains that a `pi-engram init` that landed the Engram entry in the
-  legacy file has to be moved across.
-- The smoke test only ran on Posix hosts: it built its temporary project under
-  the hardcoded `/tmp` (absent on Windows) and imported the extension through a
-  hand-built `file://` string. It now uses `os.tmpdir()` and `pathToFileURL`,
-  and `node tests/harness.test.mjs` works unchanged on Windows, macOS and
-  Linux.
-- `node tests/harness.test.mjs` failed with `ERR_UNKNOWN_FILE_EXTENSION ".ts"`
-  on Node releases before 22.18, which cannot import the TypeScript extension
-  without `--experimental-strip-types`. The test now re-runs itself with the
-  flag when the runtime lacks TypeScript support.
-- A Windows checkout with `core.autocrlf` enabled could rewrite the repository
-  to CRLF. `.gitattributes` pins the working tree to LF.
-
-- `harness-dispatch` reported its failures by returning `{ isError: true }`, but
-  `AgentToolResult` has no such field and the Pi runtime only marks a tool call
-  as an error when `execute` throws. Every dispatch gate failure (disabled
-  dispatch, unknown agent, empty brief, missing contract file, unsupported
-  model effort) was therefore recorded as a **success**. The failure paths now
-  throw, and a batch in which every agent failed throws with the per-agent
-  summary in the message so the model still sees why. A partial batch still
-  resolves normally and reports the failures in its text.
-
-- `init --force` failed on any project that pasted the contract into its
-  `AGENTS.md` by hand, which is what the README documented until now and what
-  the installer itself recommends. The contract was only recognised through the
-  installer markers, so a pasted section read as a conflict and `--force`
-  turned that into a hard error — `update` hit the same wall, which left the
-  first generation of adopters unable to upgrade without editing `AGENTS.md`
-  themselves. The section is now compared by content: present and unmodified
-  means `unchanged`, and the file is never rewritten. A section that *was*
-  edited is still refused, and `--force` still does not overwrite it.
-- The "refusing to overwrite" error sent you to `--force`, which is what the
-  `AGENTS.md` conflict then refused. The message now names `update`, the
-  command that actually upgrades an installation.
-- `init` on a project that already has the harness did half the work and
-  exited successfully, so an upgrade could look like it had happened. The
-  report now states, before anything is written, that this is an install and
-  that `update` is the upgrade command.
-
-### Changed
-
-- A fresh install now reports the placeholders it shipped — the five
-  `model: provider/model-id` agents and `project: my-project` — in the report
-  and not only in a "Next steps" line. They are warnings, not errors: the
-  installer has no model catalog, but `/harness-config` fails until they are
-  set, and the user should hear it from the tool that wrote the file.
-- The installer warns when it runs on Node < 22, the documented prerequisite
-  for loading the extension. Not blocking: the installer can run on one Node
-  while Pi loads the extension with another.
-- `defaults.subagent_context_file` is no longer part of the shipped
-  configuration: it is optional, because the contract is resolved by
-  existence. Existing projects keep the key and keep working, including the
-  projects whose key names a file they no longer have.
-- `init` and `update` create an empty `CHANGELOG.md` in the adopting project
-  when it has none — the contract asks every agent to record its work in a
-  changelog, and most projects have no file to write to. The new one holds the
-  Keep a Changelog heading and nothing else: no invented history, and an
-  existing changelog is never touched.
+The workflow engine is replaced. This is a breaking change to the configuration
+format; see [MIGRATION.md](MIGRATION.md).
 
 ### Added
 
-- `npx pi-minimal-harness update`: one command that upgrades an existing
-  installation. It replaces the upstream-owned files (extension, prompts,
-  delivery skill, `AGENTS.md` contract block) and merges the local
-  `harness.config.yaml` **additively** — keys the newer template introduced are
-  added with their default value and the comment that documents them, while
-  every existing value, extra key and YAML sequence is left untouched and no
-  key is ever removed. The previous config is kept as `harness.config.yaml.bak`
-  (Git-excluded) whenever something is added, `--dry-run` lists every addition
-  without writing, and the local file's indentation width and line endings are
-  preserved. `init` uses the same merge, so it can no longer be blocked by an
-  edited config.
-- Control tools `harness_decision` and `harness_report`: the pipeline's
-  decision and per-step report are now recorded by a tool call instead of being
-  parsed out of the reply. The `HARNESS-DECISION` and `HARNESS-DONE` markers stay
-  supported as a fallback for one release, and the tool wins when both are
-  present. `harness_report` also captures the changed files and the checks that
-  were run, which later steps can verify instead of trusting.
-- `defaults.strict_decision_marker` (default `false`; enabled in this
-  repository's own config): a multi-step pipeline stops with an error when the
-  orchestrator's reply carries no usable decision marker, instead of reading
-  its absence as "not `ANSWER_ONLY`" and running the file-mutating steps.
-- `defaults.preflight_policy` (`advisory` | `blocking`): under `blocking`, a
-  dirty working tree or an open pull request stops the first step that mutates
-  files. With a TUI the operator is asked once; without one the step is blocked
-  and reported as an error — never silently continued.
-- `agents.<name>.mutates_files` marks which steps may modify files, so the
-  preflight gate can protect them without naming agents in the extension.
-  Agents without the field are assumed to mutate files, and `/harness-config`
-  validation lists them.
-- A dependency-free `pi-minimal-harness init` installer with dry-run, force,
-  idempotent contract merging, and local Git exclusion for the generated config
-  and its `update` backup.
-- Model-aware reasoning-effort selection in `/harness-model`: after choosing a
-  model from Pi's catalog, the operator chooses from the effort levels exposed
-  by that model. Model and effort are persisted atomically in the agent block.
+- **A real state machine.** Control flow is a transition table in
+  `.pi/extensions/lib/transitions.ts`: pure data, and the single source of
+  truth for what runs when. Two rules are enforced by the table rather than
+  stated in a prompt — no agent result moves the workflow past `PLANNING`, and
+  an agent cannot choose its successor, because the result envelope is a closed
+  shape and unknown fields are rejected by name.
+- **A user approval gate.** The planner declares a plan ready; the workflow
+  suspends; the user approves, asks for changes or stops. v1 let the planner
+  approve its own plan.
+- **Structured suspensions.** Every stop declares its reason (`needs_input`,
+  `awaiting_approval`, `retry_limit`, `delivery_blocked`, `agent_failed`) and
+  its resume point as data. v1 inferred the reason from the wording of a
+  synthesised question, and always resumed at the planner.
+- **A shared retry budget.** One unit is spent whenever the workflow re-enters
+  `IMPLEMENTING`, whether the reviewer or the tester sent it back.
+  `harness.max_retries` replaces having no policy at all.
+- **Doubt escalation.** An agent that cannot decide something hands the doubt
+  to the runtime first. The runtime settles it when it is checkable in the
+  repository or the configuration, and escalates to the user when the topic is
+  one only they can decide — scope, requirements, behaviour, architecture,
+  strategy or acceptance criteria.
+- **Requirements and traceability.** `.harness/requirements.md` with stable
+  `REQ-NNN` identifiers, maintained by the planner and reported by everyone
+  else, forming one chain: requirement → change → review → check → delivery.
+- **A changelog gate.** The implementer is the only agent that writes the
+  changelog; the deliverer refuses to ship while a delivered requirement is not
+  cited in `[Unreleased]`.
+- **`capabilities` instead of `tools`.** Capabilities map to real Pi tools where
+  Pi has them — so an agent without `shell` cannot run a command — and degrade
+  to a documented fallback where it does not. v1's `tools` was read by nobody
+  except a test.
+- **`tests/extension.test.mjs`.** Loads the extension the way Pi does. Added
+  after a v2 `harness.ts` shipped with broken template literals and the whole
+  suite stayed green, because the entry point was the only file nothing
+  imported.
 
 ### Changed
 
-- `README.md` now documents the full CodeGraph setup — `npm i -g codegraph`,
-  `codegraph init` in the project, and the `codegraph` entry to add under
-  `mcpServers` in `~/.pi/agent/mcp-adapter.json` (`serve --mcp`, `directTools:
-  false`, `lifecycle: "lazy"`) — and the upgrade command shows the common case
-  (`cd` into the project, then `npx --yes pi-minimal-harness@latest update`)
-  alongside `--project`, with `/reload` and `/harness-config` as the follow-up.
-- A turn whose assistant message still carries a pending tool call no longer
-  satisfies the auto-harness turn wait, so a step that uses a tool is no longer
-  read as finished between the tool call and its follow-up.
-- The `HARNESS-DECISION` marker is only read on the **last non-empty line** of
-  the orchestrator's reply. A marker quoted earlier (in prose, a code fence or
-  a list of examples) no longer decides the pipeline and is no longer stripped
-  from the visible reply; a final line naming both variants is ambiguous and
-  yields no decision.
-- `HARNESS-DONE` is now verified after **every** step instead of only the last
-  one, with one repair turn per step naming the step, and the pipeline stops
-  when a step still omits its report. A direct `ANSWER_ONLY` answer owes no
-  report and is never repaired.
-- Configuration validation now checks configured model IDs and model-supported
-  reasoning efforts when Pi's catalog is available.
-- Pipeline and background dispatch reject or warn about unsupported
-  model/effort combinations instead of silently applying them.
-- The interactive model/effort picker now returns to the agent menu after each
-  saved change, with an explicit `Cancel` action; argument-based selection stays
-  one-shot.
-- README Engram setup now recommends `pi-engram init` instead of requiring
-  manual Pi and MCP configuration.
-- Add `/harness-delivery` to run the delivery agent without changing the
-  configured workflow mode.
-- Add an advisory repository preflight before pipelines to warn about
-  uncommitted changes, branch divergence, and open pull requests.
+- The extension is now a thin entry point over `.pi/extensions/lib/`: 2423
+  lines become 329. Commands are `/harness-run`, `/harness-answer`,
+  `/harness-config`, `/harness-model` and `/harness-status`; `/harness-mode`,
+  `/harness-delivery`, the `harness-dispatch`, `harness_decision` and
+  `harness_report` tools are gone.
+- Agents are isolated processes and the driver waits on them, so the session is
+  no longer driven turn by turn: no idle polling, and two workflows cannot
+  interleave.
+- Agent-to-agent traffic is English. What the user reads follows the user's
+  language; the question is the only field inside the envelope that does.
+- The installer now copies `.pi/extensions/lib/`, without which every adopter
+  would have received an extension whose imports all failed, and ships an
+  allowlist rather than matching `prompts/` as a substring.
+
+### Removed
+
+- Workflow modes and `workflows.<mode>.steps`. The flow is fixed.
+- `question_short_circuit`, `strict_decision_marker`, `allow_dispatch`,
+  `preflight_policy`, `mutates_files`, `prompt_template`, `responsibilities`,
+  `skills`, `model_catalog_source`, `project`, `allow_simple_mode`,
+  `preferred_interface` and `fallback_interface`: keys nothing read, or concepts
+  the orchestrator removal made meaningless.
+
+### Fixed
+
+- The installer matched upstream files by substring, so a stray file in
+  `prompts/` would have been copied into every adopting project.
+- `findModelRef` and `supportedReasoningLevels` existed only in the v1
+  extension and nowhere else; `/harness-model` could not have worked.
 
 ## [0.1.0] - 2026-09-24
 

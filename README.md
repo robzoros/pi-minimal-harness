@@ -1,414 +1,136 @@
 # pi-minimal-harness
 
-A minimal, configuration-driven **agent harness for [Pi](https://github.com/earendil-works/pi)**:
-a multi-agent workflow (orchestrator → explorer → critic → implementer →
-delivery) that the Pi runtime executes step by step, with per-agent models,
-reasoning efforts, prompt templates, interactive slash commands, and
-evidence-based reports.
+A configuration-driven agent harness for [Pi](https://github.com/badlogic/pi-mono).
+Work runs through a state machine that hands each step to an isolated agent with
+only the context that step needs.
 
-Drop it into a Pi project, edit one YAML file, and your requests run through a
-workflow you can actually audit.
-
-## Inspiration
-
-- **Inspired by `gentle-pi` (Gentleman Programming)** — this is **not a fork**
-  of gentle-pi. If you are starting from zero, **use gentle-pi or at least look
-  at it first**; it is a battle-tested, opinionated Pi workflow with a whole
-  ecosystem around it. `pi-minimal-harness` is the stripped-down,
-  YAML-configured alternative you take when you want the harness to be a
-  handful of files you fully understand and can rewrite.
-  <!-- TODO: confirm the gentle-pi repository URL before publishing -->
-- **Why Engram**: persistent memory that survives sessions, compactions and
-  agents. Local-first (one Go binary, SQLite + FTS5), a disciplined save/search
-  protocol instead of stuffing raw context into the prompt, and one brain
-  shared by every MCP-capable tool — the same reasons the inspired ecosystem
-  uses it. Optional packages: [`gentle-engram`](https://www.npmjs.com/package/gentle-engram)
-  + `pi-mcp-adapter`.
-- **Why CodeGraph**: structural exploration on demand (callers, impact,
-  affected tests) instead of guessing from grep. Used **selectively** — only
-  when relationships matter; simple changes are read directly from source.
-
-## What you get
-
-| Piece | What it does |
-|---|---|
-| Workflow modes | `simple`, `full-dry-run`, `full`, `implementation-only`, `delivery-only` — ordered agent steps from one YAML |
-| Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
-| Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
-| Report guarantee | Every step that owes a report calls `harness_report` with all its fields (fallback: ends with `HARNESS-DONE`); an incomplete report earns one repair turn per step, and the pipeline stops if it is still incomplete |
-| Control tools | `harness_decision` and `harness_report` replace the textual markers as the primary signal; the markers stay as a one-release fallback |
-| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
-| Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
-| Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
-| Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
-| Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
-| Upgrade | `npx pi-minimal-harness update` refreshes upstream files and **only adds** missing keys to your config |
-| Tests | `node tests/harness.test.mjs` (139 checks) and `node tests/install.test.mjs` (8 installer tests) |
-
-## Install in your Pi project
-
-**Prerequisites:** Pi (tested with v0.87.x) and Node ≥22 (Pi runs the
-extension with `jiti`; no build step, no `package.json` needed).
-
-**Files to copy into the adopting project:**
-
-```text
-your-project/
-├── .pi/
-│   └── extensions/
-│       └── harness.ts          # the whole harness (commands, driver, dispatch)
-├── harness.config.yaml         # modes, agents, models, gates
-├── prompts/                    # the five agent prompt templates
-│   ├── orchestrator.md
-│   ├── explorer.md
-│   ├── critic.md
-│   └── implementer.md
-│   ├── delivery.md
-├── .agents/
-│   ├── skills/
-│   │   └── github-delivery/SKILL.md
-│   └── harness/                # optional: extra design notes
-├── tests/
-│   └── harness.test.mjs        # optional but recommended
-├── pi-minimal-harness.md       # the harness contract (AGENTS.md points at it)
-└── AGENTS.md                   # your rules + the reference to the contract
-```
-
-**Steps:**
-
-1. Copy the files above.
-2. **Point your project's `AGENTS.md` at `pi-minimal-harness.md`** by adding
-   the reference the installer writes (or let `npx pi-minimal-harness init`
-   write it for you):
-
-   ```markdown
-   ## pi-minimal-harness instructions
-   * **Harness Rules:** Read pi-minimal-harness.md and strictly follow its guidelines for this project's harness.
-   * **Conflict Resolution:** If any rules in AGENTS.md conflict with pi-minimal-harness.md, the rules in AGENTS.md take precedence.
-   ```
-
-   The contract is a file of its own, not a section pasted into `AGENTS.md`:
-   `update` replaces it wholesale, and a paste would be lost on the next
-   upgrade. Dispatched subagents get it from the first file that exists, in this
-   order: `defaults.subagent_context_file`, `pi-minimal-harness.md`, an
-   `AGENTS.md` that carries the harness block, then a legacy
-   `AGENTS-addition.md`. Leave the key unset and every variant works.
-3. Edit `harness.config.yaml`: set `project:`, pick models **from Pi's
-   `/models` output** (never invent IDs), set each agent's supported reasoning
-   effort, and set `defaults.workflow_mode`.
-4. Start Pi in your project and run `/reload`.
-5. Try it: `/harness-mode full-dry-run`, then a plain question (it should stop
-   at the orchestrator), then `/harness-run "a small task"`.
-
-## Automated project installation
-
-Install this harness into an existing project with:
+You write a configuration and a set of role prompts. The harness decides who
+runs, what they see, when to loop, when to stop and when to ask you.
 
 ```bash
 npx pi-minimal-harness init
 ```
 
-The commands differ in effect:
+## What it does
 
-| Command | Effect |
+```
+you ─▶ planner ─▶ explorer ─▶ implementer ─▶ reviewer ─▶ tester ─▶ deliverer
+                   │                          ▲            │
+                   │                          └── retry ────┘
+                   ▼
+             you approve
+```
+
+Each agent is a separate `pi` process with its own model, its own tools and its
+own context. Nothing is inherited from a conversation, because there is no
+conversation.
+
+Two rules the runtime enforces rather than documents:
+
+- **The planner cannot approve its own plan.** It declares the plan ready, the
+  workflow suspends, and *you* decide. No agent result moves the workflow past
+  `planning`.
+- **An agent cannot choose its successor.** The result envelope has a closed
+  shape; a field that is not part of the contract is rejected and named back.
+
+## Requirements, and traceability
+
+The planner maintains a requirements file with stable identifiers. Every other
+role reports contradictions rather than editing it. Between them they form one
+chain:
+
+```
+requirement → change → review → check → delivery
+```
+
+The deliverer refuses to ship while any link is missing — including a delivered
+requirement that is not cited in the changelog.
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| `npx pi-minimal-harness init` | **Installs** the extension, prompts, delivery skill, `harness.config.yaml`, and the `AGENTS.md` contract. |
-| `npx pi-minimal-harness init --dry-run` | **Only previews** the changes; it writes no files. |
-| `npx pi-minimal-harness update` | **Upgrades** an installation: refreshes what Pi runs and only adds missing config keys. |
+| `/harness-run <task>` | Start a workflow |
+| `/harness-answer <text>` | Answer one that is waiting for you |
+| `/harness-config` | Show and validate the configuration |
+| `/harness-model <agent>` | Choose a model and effort for one agent |
+| `/harness-status` | Which phase the workflow is in, and why |
 
-`init` is for a project that does not have the harness yet. Running it on one
-that does still works — it is idempotent and additive — but it is not an
-upgrade, so the report says so and names `update`. The only two situations that
-make an installer command stop are worth knowing:
+With `harness.auto_start` on, a plain message starts a workflow — unless one is
+already waiting, in which case your message is the answer.
 
-- a **conflict** in a file the harness owns: refused, with `--force` or
-  `update` named in the message;
-- an `AGENTS.md` whose `## Harness workflow` section has been **edited by
-  hand**: refused, and the file is left byte-for-byte untouched, `--force`
-  included. A contract that is present but unmodified — pasted without the
-  installer markers, which is the documented adoption path — is recognised as
-  present and never rewritten.
-
-A fresh install ships the template's placeholders, and the report says so
-loudly rather than leaving it in a "Next steps" line nobody reads:
-
-```text
-  warning 5 agent(s) still use the template model placeholder (model: provider/model-id)
-  warning project: is still the template placeholder (project: my-project)
-```
-
-`/harness-config` fails until the models come from Pi's `/models` output.
-
-The installer is idempotent: running it again does not duplicate the contract
-or rewrite identical files. It refuses to overwrite conflicting files unless
-`--force` is supplied. Your `harness.config.yaml` is never overwritten: it is
-created from `harness.config.example.yaml` when missing and otherwise merged
-additively, so a new upstream key is added and your values are kept.
-
-The generated `harness.config.yaml` is treated as local configuration. When the
-project is inside a Git repository, the installer adds it to the repository's
-local `.git/info/exclude`, so model choices and workflow settings do not appear
-in `git status` or travel with pushes. The versionable source template is
-`harness.config.example.yaml`.
-
-Other useful options:
-
-```bash
-# Install into a specific project
-npx pi-minimal-harness init --project /path/to/project
-
-# Replace conflicting generated files
-npx pi-minimal-harness init --force
-
-# Show the command help
-npx pi-minimal-harness init --help
-```
-
-After installation, configure models in `harness.config.yaml`, run `/reload`,
-and validate with `/harness-config`.
-
-## Upgrade an existing installation
-
-```bash
-cd /path/to/project
-npx --yes pi-minimal-harness@latest update
-```
-
-Pass `--project /path/to/project` to update a project without changing
-directory; without it `update` works on the current directory.
-
-`update` replaces everything Pi executes — the extension, the prompts, the
-delivery skill and the `AGENTS.md` contract block — and **only adds** the keys
-a newer release introduced to your `harness.config.yaml`. It never overwrites a
-value you set, never removes a key and never rewrites a YAML sequence. The
-guarantee in one line: *update replaces what Pi runs and only adds keys to your
-configuration*.
-
-```text
-  add defaults.preflight_policy in harness.config.yaml
-  added 1 key(s) to harness.config.yaml (existing values untouched)
-  backup harness.config.yaml.bak
-```
-
-Preview it first with `update --dry-run`, which lists every addition and writes
-nothing. When at least one key is added, the previous config is kept as
-`harness.config.yaml.bak` (excluded from Git together with the config); when
-nothing is missing, no backup is written. The new keys arrive with the
-template's default values, so run `/reload` in Pi to load the updated extension
-and prompts, then `/harness-config` to review and validate the configuration.
-`update` needs no flags: it always refreshes upstream-owned files.
-
-**Optional integrations** (both recommended, both independent of the harness):
-
-- **Engram**: install the Engram binary, then let its Pi helper configure the
-  integration:
-
-  ```bash
-  pi install npm:gentle-engram
-  pi install npm:pi-mcp-adapter
-  ```
-
-  The helper `pi-engram` is **not on your `PATH`**: `pi install` puts it in
-  npm's private `node_modules/.bin`, which npm only adds to `PATH` for scripts
-  run inside that package, so the shims of Pi packages never reach the system
-  `PATH`. Call it by path:
-
-  ```bash
-  # Git Bash, macOS or Linux
-  ~/.pi/agent/npm/node_modules/.bin/pi-engram init
-
-  # PowerShell on Windows
-  & "$env:USERPROFILE\.pi\agent\npm\node_modules\.bin\pi-engram.cmd" init
-
-  # equivalent, without the shim
-  node "$HOME/.pi/agent/npm/node_modules/gentle-engram/cli.js" init
-  ```
-
-  Do not reach for `npx pi-engram`: the package is `gentle-engram` and
-  `pi-engram` is only its binary name, so `npx` would look for a package of that
-  name in the registry. If you prefer the bare command, add
-  `~/.pi/agent/npm/node_modules/.bin` to your `PATH`; the paths above keep
-  working even if that directory moves.
-
-  Restart Pi (or run `/reload`) afterward. The helper writes the package
-  declarations to Pi's `settings.json` and the Engram MCP server to the agent
-  directory, including `engram mcp --tools=agent`; it also keeps
-  MCP tools from duplicating Pi's native `mem_*` tools. The Engram binary
-  itself must be installed separately; when it is not on your `PATH`, set
-  `ENGRAM_BIN` to its absolute path instead. Normally you do not need to run
-  `engram serve`: Engram starts it on demand. Use `--force` to replace an
-  existing Engram MCP entry. See [`pi-minimal-harness.md`](pi-minimal-harness.md)
-  for the memory protocol.
-
-  The adapter reads its own `~/.pi/agent/mcp-adapter.json`
-  (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on Windows). Helper versions that
-  still write the legacy `mcp.json` next to it put the entry in a file whose
-  `mcpServers` may be owned by Pi's built-in MCP; if the helper put it there,
-  move that entry to `mcp-adapter.json` (same shape as the CodeGraph example
-  below).
-- **CodeGraph**: install the CLI, then index the repository:
-
-  ```bash
-  npm i -g codegraph
-  cd /path/to/project && codegraph init
-  ```
-
-  `codegraph init` indexes the current repository; `codegraph init --cwd <repo
-  root>` does the same for an explicit root. The index lives in `.codegraph/` at
-  the repository root and must not be committed.
-
-  Then register the server in the MCP adapter's own config file,
-  `~/.pi/agent/mcp-adapter.json` (`%USERPROFILE%\.pi\agent\mcp-adapter.json` on
-  Windows) — that is the adapter's file, **not** `mcp.json` — adding the entry
-  under `mcpServers`:
-
-  ```json
-  {
-    "mcpServers": {
-      "codegraph": {
-        "command": "codegraph",
-        "args": ["serve", "--mcp"],
-        "directTools": false,
-        "lifecycle": "lazy"
-      }
-    }
-  }
-  ```
-
-  `directTools: false` keeps the tools behind the adapter's namespace instead of
-  exposing them directly, the same as Engram, and `lifecycle: "lazy"` starts the
-  server on first use (the other accepted values are `eager`, `keep-alive` and
-  `lazy-keep-alive`). Run `/reload` after editing the file to connect. CodeGraph
-  is the tool the `explorer` agent uses, so it is only worth configuring when
-  structural exploration is part of your workflow.
-
-## Configuration reference
-
-`harness.config.yaml` (line-oriented YAML; the extension preserves your
-formatting when it edits):
+## Configuration
 
 ```yaml
-project: my-project
-defaults:
-  workflow_mode: simple          # simple | full-dry-run | full | implementation-only | delivery-only
-  auto_harness: true             # plain requests run through the pipeline
-  question_short_circuit: true   # orchestrator's ANSWER_ONLY stops the pipeline
-  allow_dispatch: true           # enable the harness-dispatch tool
-                                   # subagent contract: defaults.subagent_context_file
-                                   # if it exists, else pi-minimal-harness.md,
-                                   # else an AGENTS.md carrying the harness block
-  strict_decision_marker: true   # stop when the orchestrator emits no decision
-  preflight_policy: advisory     # advisory | blocking (blocking gates file-mutating steps)
-workflows:
-  full: { steps: [orchestrator, explorer, critic, implementer, delivery] }
+harness:
+  version: 2
+  requirements_file: .harness/requirements.md
+  max_retries: 3
+  agent_timeout_ms: 600000
+  auto_start: true
+  subagent_context_file: pi-minimal-harness.md
+
 agents:
-  orchestrator:
-    model: provider/model-id     # exact id from /models
-    reasoning: medium            # effort supported by the selected model; off for non-reasoning models
-    mutates_files: false         # may this step modify files? (gates preflight_policy)
-    prompt_template: prompts/orchestrator.md
-skills:
-  project_directory: .agents/skills
-  current: [github-delivery]
+  implementer:
+    model: provider/model-id
+    reasoning: high
+    capabilities: [read, write, shell, vcs, github, memory]
 ```
 
-`/harness-model` reads Pi's live model catalog. After choosing a model, it asks
-for an effort only among the levels exposed by that model's provider metadata;
-non-reasoning models are saved as `reasoning: off`. After a successful
-interactive change, the picker returns to the agent menu so several agents can
-be configured in one session; choose `Cancel` there to return to the prompt.
-Explicit argument forms remain one-shot operations. Model and effort are written
-together, so cancelling or choosing an unsupported effort leaves the existing
-configuration unchanged.
+Every key is read by the runtime. There are no documentation-only keys, and
+`/harness-config` rejects anything it does not recognise — including a leftover
+from an older version.
 
-Validate any time with `/harness-config` → *Validate configuration* (checks
-modes, agents, catalog model IDs, model-supported reasoning efforts, templates,
-workflow steps, the contract file and the delivery skill).
+### Capabilities
 
-## Control tools
-
-The harness asks its agents two questions — *does this task need file changes?*
-and *did this step finish its report?* — through tools instead of conventions
-in free text, so the answer is recorded by the call itself rather than parsed
-out of a reply:
-
-| Tool | Called by | Arguments |
+| Capability | Enforced? | Becomes |
 |---|---|---|
-| `harness_decision` | the orchestrator step, once at the end of the turn | `decision` (`ANSWER_ONLY` or `PIPELINE`, case-insensitive), `reason` |
-| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes`, `lessons` (findings worth reusing; `[]` when there are none) |
+| `read` | yes | `read`, `find`, `grep`, `ls` |
+| `write` | yes | `edit`, `write` |
+| `shell` | yes | `bash` |
+| `memory` | declared | `mem_*`; warns and degrades if absent |
+| `graph` | declared | `codegraph_*`; degrades to `grep`/`rg` |
+| `vcs` | declared | `git`; **requires** `shell` |
+| `github` | declared | `gh`; **requires** `shell` |
 
-All four fields are required: a report that omits one is incomplete and gets
-the same single repair turn a missing report gets. The `HARNESS-DONE` marker
-cannot be inspected, so it always counts as complete.
+Only the first three map to Pi tool names, because Pi's vocabulary is
+`{read, bash, edit, write, find, grep, ls, powershell}`. What enforcement buys
+is real, though: an agent without `shell` cannot run a single command.
 
-Both are inert outside a running pipeline, and an unusable argument makes the
-call fail instead of being silently ignored. When a tool call and a textual
-marker disagree, the tool wins. The markers (`HARNESS-DECISION`,
-`HARNESS-DONE`) remain supported as a fallback for one release.
+`write` is a **capability boundary, not a sandbox**. Both the planner and the
+implementer hold it, and those tools cannot be restricted to a path.
 
-Before starting a pipeline, the harness performs a repository preflight. It
-warns about uncommitted changes, an upstream branch that is ahead or behind,
-and an open pull request when GitHub CLI is available. Set
-`defaults.preflight_policy: blocking` to make the risky states *stop* the first
-step marked `mutates_files: true` (uncommitted changes and an open pull
-request; branch divergence stays a warning, because pulling is your call). In
-`blocking` mode the operator is asked once — and without a TUI the step is
-blocked and reported as an error rather than continuing silently. Unmarked
-agents are assumed to mutate files; `/harness-config` validation lists them.
-`/harness-delivery` is intended for delivering the current verified changes
-without changing `defaults.workflow_mode`.
+## When the workflow stops
 
-## Commands and markers
+It stops when it needs you: the plan is ready, an agent cannot decide something
+alone, the retry budget is spent, or delivery is blocked. Every suspension says
+which of those it is and exactly where it resumes — `retry_limit` returns to the
+implementer, a question returns to whoever asked it.
 
-| Command / marker | Meaning |
-|---|---|
-| `/harness-config` | Interactive menu: show, set mode, set model + effort, validate, explain |
-| `/harness-mode [mode]` | Show or change `defaults.workflow_mode` |
-| `/harness-model [agent [model-id [effort]]]` | Interactively change models/efforts for one or more agents; arguments are one-shot |
-| `/harness-run <task>` | Force the pipeline for one task |
-| `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
-| `/harness-auto [on\|off]` | Plain requests → pipeline |
-| `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply — fallback for when `harness_decision` is unavailable |
-| `HARNESS-DONE` | Fallback completion marker for every non-orchestrator agent reply |
+## Layout
 
-## Skills
+```
+.pi/extensions/harness.ts     commands, hooks, footer
+.pi/extensions/lib/           the machine: transitions, state, runner, driver
+prompts/                      six role prompts
+pi-minimal-harness.md         the contract, copied to adopters
+MIGRATION.md                  moving a v1 project to v2
+tests/                        seven suites, no framework
+```
 
-[Skills](https://github.com/earendil-works/pi) are Markdown procedures Pi loads
-when a task matches their description — they keep instructions out of context
-until needed.
+## Migrating from v1
 
-- **Shipped:** `.agents/skills/github-delivery/SKILL.md` — delivers verified
-  work through GitHub: branch → Conventional Commit → push → PR with issue
-  linkage and one `type:*` label. Invoke it explicitly with
-  `/skill:github-delivery`, or let Pi auto-invoke it when you ask to deliver.
-- **Usage:** a skill is a directory with `SKILL.md` (frontmatter `name` +
-  `description`). The description decides when the model loads it — state both
-  what it does and when it applies.
-- **Add your own:** `.agents/skills/<name>/SKILL.md`. Create one only for
-  recurring procedures with safety or ordering constraints; the harness
-  validates that `github-delivery` exists (the delivery agent depends on it).
+The configuration format changed completely and cannot be edited into shape.
+See [MIGRATION.md](MIGRATION.md).
 
-## Documentation map
+## Tests
 
-- [`pi-minimal-harness.md`](pi-minimal-harness.md) — the contract installed
-  in your project (harness rules, memory, CodeGraph, verification, skills);
-  your `AGENTS.md` only points at it and wins any conflict.
-- [`docs/WORKFLOW.md`](docs/WORKFLOW.md) — agent roles, modes and the
-  configuration shape in depth.
-- [`docs/DISPATCH-PLAN.md`](docs/DISPATCH-PLAN.md) — background dispatch design
-  (milestones M1–M4 implemented; M5 = manual end-to-end).
-- [`CHANGELOG.md`](CHANGELOG.md) — releases.
+```bash
+npm test
+```
 
-## License
+Seven suites, 463 checks plus 15 installer tests, no network, no model, no dependencies.
 
-MIT — see [LICENSE](LICENSE).
+## Licence
 
-## Credits
-
-- [Pi](https://github.com/earendil-works/pi) — the agent runtime this harness
-  extends.
-- [`gentle-shell`](https://github.com/Gentleman-Programming/gentle-shell) de **Gentleman Programming** — the inspiration (not a fork; go look
-  at it). 
-- [`engram`](https://github.com/Gentleman-Programming/engram) comes from the same ecosystem:
-  .
-- CodeGraph — structural exploration for source trees.
+MIT.
