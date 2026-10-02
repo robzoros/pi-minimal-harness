@@ -119,14 +119,21 @@ async function copyFileIfAllowed(source, destination, options, report) {
   }
 }
 
-/** True for the files the harness owns, which an installation always has. */
+/**
+ * True for the files the harness owns, which an installation always has.
+ *
+ * An ALLOWLIST, not a pattern. `prompts/` used to match anything inside it,
+ * which meant a stray file in that directory would be shipped into every
+ * adopting project: a 17 MB artefact very nearly did. Anything the harness does
+ * not ship has to be named here.
+ */
 function harnessOwned(destination) {
   const relative = destination.split(path.sep).join("/");
-  return (
-    relative.includes("/.pi/extensions/harness.ts") ||
-    relative.includes("/prompts/") ||
-    relative.endsWith(`/${CONTRACT_FILE}`)
-  );
+  if (relative.endsWith(`/${CONTRACT_FILE}`)) return true;
+  if (relative.includes("/.agents/skills/")) return true;
+  if (relative.includes("/.pi/extensions/lib/")) return relative.endsWith(".ts");
+  if (/\/prompts\/[^/]+\.md$/.test(relative)) return true;
+  return relative.endsWith("/.pi/extensions/harness.ts");
 }
 
 async function walkFiles(directory) {
@@ -529,6 +536,7 @@ async function install(options) {
     options,
     report,
   );
+  await copyTree(path.join(PACKAGE_ROOT, ".pi", "extensions", "lib"), path.join(options.project, ".pi", "extensions", "lib"), options, report);
   await copyTree(path.join(PACKAGE_ROOT, "prompts"), path.join(options.project, "prompts"), options, report);
   await copyTree(
     path.join(PACKAGE_ROOT, ".agents", "skills", "github-delivery"),

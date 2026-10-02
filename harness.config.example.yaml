@@ -1,135 +1,72 @@
-project: my-project
+# pi-minimal-harness configuration (v2)
+#
+# v2 has no workflow modes: the flow is fixed and the runtime is a state
+# machine. Every key below is read by the runtime; there are no documentation-
+# only keys. Anything not listed here is rejected by `validate` with an error.
 
-defaults:
-  workflow_mode: simple
-  auto_harness: true
-  question_short_circuit: true
-  allow_dispatch: true
-  allow_simple_mode: true
-  # A missing or ambiguous decision marker stops the pipeline instead of being
-  # read as "not ANSWER_ONLY", which would run the mutating steps of a task
-  # that may only need an answer. Set to false to keep guessing.
-  strict_decision_marker: true
-  # `advisory` only reports the repository state; `blocking` stops the first
-  # step that mutates files when the tree is dirty or a pull request is open.
-  preflight_policy: advisory
-
-commands:
-  preferred_interface: slash
-  fallback_interface: skills
-  model_catalog_source: /models
-
-workflows:
-  full-dry-run:
-    steps:
-      - orchestrator
-      - explorer
-      - critic
-  full:
-    steps:
-      - orchestrator
-      - explorer
-      - critic
-      - implementer
-      - delivery
-  simple:
-    steps:
-      - orchestrator
-      - implementer
-  implementation-only:
-    steps:
-      - orchestrator
-      - implementer
-  delivery-only:
-    steps:
-      - orchestrator
-      - delivery
+harness:
+  # Must be 2. A missing or different value means this is a v1 configuration;
+  # run `npx pi-minimal-harness update` to migrate it.
+  version: 2
+  requirements_file: .harness/requirements.md
+  # Shared retry budget: one unit is spent every time the workflow re-enters
+  # IMPLEMENTING, whether the reviewer or the tester sent it back. With 3, the
+  # implementer runs at most 4 times before the workflow suspends for the user.
+  max_retries: 3
+  agent_timeout_ms: 300000
+  # Plain (non-slash) requests start the workflow.
+  auto_start: true
+  # Contract injected into each agent. Falls back to pi-minimal-harness.md, then
+  # an AGENTS.md carrying the harness block.
+  subagent_context_file: pi-minimal-harness.md
 
 agents:
-  orchestrator:
-    model: provider/model-id
-    reasoning: medium
-    mutates_files: false
-    tools:
-      - filesystem
-      - engram
-      # The orchestrator runs in every mode, so structural exploration belongs
-      # here too; remove the line when CodeGraph is not installed.
-      - codegraph
-    prompt_template: prompts/orchestrator.md
-    responsibilities:
-      - classify_task
-      - select_workflow_mode
-      - prepare_next_agent_prompt
-      - record_findings_with_engram
-  explorer:
+  planner:
     model: provider/model-id
     reasoning: high
-    mutates_files: false
-    tools:
-      - filesystem
-      - openspec
-      - engram
-      - codegraph
-    prompt_template: prompts/explorer.md
-    responsibilities:
-      - explore_repository
-      - identify_relevant_files
-      - propose_solution
-      - record_findings_with_engram
-  critic:
+    # Owns the requirements file, so it needs `write` for that file and nothing
+    # else. It writes no code; that is a role boundary, not a capability one —
+    # Pi's write capability cannot be restricted to a path.
+    capabilities: [read, write, memory, graph]
+
+  explorer:
     model: provider/model-id
     reasoning: medium
-    mutates_files: false
-    tools:
-      - filesystem
-      - openspec
-    prompt_template: prompts/critic.md
-    responsibilities:
-      - challenge_plan
-      - identify_risks
-      - suggest_simpler_approach
+    capabilities: [read, memory, graph]
+
   implementer:
     model: provider/model-id
     reasoning: high
-    mutates_files: true
-    tools:
-      - filesystem
-      - shell
-      - tests
-      - engram
-      # `simple` and `implementation-only` never run the explorer, so the only
-      # step that edits files needs the impact check itself.
-      - codegraph
-    prompt_template: prompts/implementer.md
-    responsibilities:
-      - check_dependents_before_editing_shared_symbols
-      - edit_files
-      - run_checks
-      - inspect_diff
-      - record_findings_with_engram
-  delivery:
+    # The only agent that changes files. `write` and `shell` are what make it so;
+    # `vcs` and `github` require `shell`.
+    capabilities: [read, write, shell, vcs, github, memory, graph]
+
+  reviewer:
+    model: provider/model-id
+    reasoning: high
+    # No `shell`: it cannot run commands, so it cannot "fix" anything by accident.
+    capabilities: [read, graph, memory]
+
+  tester:
+    model: provider/model-id
+    reasoning: high
+    capabilities: [read, shell, memory]
+
+  deliverer:
     model: provider/model-id
     reasoning: low
-    mutates_files: true
-    tools:
-      - git
-      - github
-    skills:
-      - github-delivery
-    prompt_template: prompts/delivery.md
-    responsibilities:
-      - create_branch
-      - commit_changes
-      - push_branch
-      - create_pull_request
+    capabilities: [read, shell, vcs, github, memory]
 
-skills:
-  project_directory: .agents/skills
-  current:
-    - github-delivery
-  create_when:
-    - a procedure is repeated across tasks
-    - a procedure has safety or ordering constraints
-    - a procedure requires project-specific conventions
-    - a procedure benefits from a checklist
+# Capabilities, and how far each one can actually be enforced:
+#
+#   read    -> read, find, grep, ls        enforced with --tools
+#   write   -> edit, write                 enforced with --tools
+#   shell   -> bash                        enforced with --tools
+#   memory  -> mem_*                       declared; WARN if no such tool is registered
+#   graph   -> codegraph_*                 declared; WARN if no such tool is registered
+#   vcs     -> git                         declared; REQUIRES `shell`
+#   github  -> gh + the delivery skill     declared; REQUIRES `shell`
+#
+# Only the first three map to Pi tool names, because Pi's vocabulary is
+# {read, bash, edit, write, find, grep, ls, powershell}. The rest are MCP
+# servers whose names depend on your own setup, or shell commands.
