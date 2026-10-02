@@ -76,6 +76,8 @@ export interface RunAgentOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   spawnFn?: typeof spawn;
+  /** Called as the agent works. Omit it and the extra parsing costs almost nothing. */
+  onEvent?: (event: AgentEvent) => void;
   /**
    * Overridable so tests never launch a real `pi`. May be a thunk so a retry
    * test can hand out a different invocation per attempt — same idea as
@@ -190,6 +192,30 @@ export interface ModelRegistryLike {
   getAvailable(): PiModel[];
 }
 
+/**
+ * Turn one raw JSON record into at most one AgentEvent.
+ *
+ * Deliberately lossy: a rolling panel wants "bash: npm test", not the full
+ * argument object and not every token of a streamed answer. `text_delta` is
+ * dropped entirely and the completed message is reported once instead.
+ */
+function forward(opts: RunAgentOptions, record: Record<string, unknown>): void {
+  if (!opts.onEvent) return;
+  const type = record.type;
+  if (type === "tool_execution_start") {
+    const tool = typeof record.toolName === "string" ? record.toolName : "tool";
+    opts.onEvent({ kind: "tool_start", tool, detail: describeToolCall(tool, record.args) });
+    return;
+  }
+  if (type === "tool_execution_end") {
+    opts.onEvent({
+      kind: "tool_end",
+      tool: typeof record.toolName === "string" ? record.toolName : "tool",
+      ok: record.isError !== true,
+    });
+  }
+}
+
 /** Argument vector for one agent process. The brief is the prompt. */
 export function buildAgentArgs(opts: {
   promptPath: string;
@@ -265,6 +291,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentOutcome> 
 
     let buffer = "";
     let lastText = "";
+    opts.onEvent?.({ kind: "agent_started" });
     let stopReason: string | undefined;
     let errorMessage: string | undefined;
     let settled = false;
@@ -288,20 +315,28 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentOutcome> 
 
     const handleLine = (line: string) => {
       if (!line.trim()) return;
-      let event: MessageEndEvent;
+      let record: Record<string, unknown>;
       try {
-        event = JSON.parse(line) as MessageEndEvent;
+        record = JSON.parse(line) as Record<string, unknown>;
       } catch {
         return;
       }
-      if (event.type !== "message_end" || event.message?.role !== "assistant") return;
-      stopReason = event.message.stopReason ?? stopReason;
-      errorMessage = event.message.errorMessage ?? errorMessage;
-      const text = (event.message.content ?? [])
+      forward(opts, record);
+      if (record.type !== "message_end") return;
+      const message = record.message as
+        | { role?: string; stopReason?: string; errorMessage?: string; content?: { type?: string; text?: string }[] }
+        | undefined;
+      if (message?.role !== "assistant") return;
+      stopReason = message.stopReason ?? stopReason;
+      errorMessage = message.errorMessage ?? errorMessage;
+      const text = (message.content ?? [])
         .filter((part) => part.type === "text")
         .map((part) => part.text ?? "")
         .join("\n");
-      if (text.trim()) lastText = text;
+      if (text.trim()) {
+        lastText = text;
+        opts.onEvent?.({ kind: "text", text });
+      }
     };
 
     child.stdout?.on("data", (data: unknown) => {
@@ -333,6 +368,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentOutcome> 
         finish({ ok: false, exitCode: code, stopReason, text: lastText, transportError: `agent exited with code ${code}` });
         return;
       }
+      opts.onEvent?.({ kind: "agent_finished", text: lastText });
       finish({ ok: true, exitCode: code, stopReason, text: lastText });
     });
   });
@@ -346,6 +382,37 @@ export interface ExecuteStepOptions extends RunAgentOptions {
   maxRepairs?: number;
   /** Where the composed system prompt is written; defaults to the OS temp dir. */
   systemPromptDir?: string;
+}
+
+/**
+ * What an agent is doing, as it does it.
+ *
+ * Pi's JSON mode emits tool_execution_start/end and streaming text for every
+ * step. The runner used to read all of it, keep only the last assistant message,
+ * and discard the rest — so a step that took two minutes was two minutes of
+ * silence. These events are the difference between "it is working" and "it is
+ * stuck", and they cost nothing extra: the bytes were already crossing the pipe.
+ */
+export type AgentEvent =
+  | { kind: "agent_started" }
+  | { kind: "text"; text: string }
+  | { kind: "tool_start"; tool: string; detail: string }
+  | { kind: "tool_end"; tool: string; ok: boolean }
+  | { kind: "agent_finished"; text: string };
+
+/** One readable line about what a tool is being asked to do. */
+export function describeToolCall(tool: string, args: unknown): string {
+  const record = args as Record<string, unknown> | null;
+  const pick = (...keys: string[]): string => {
+    for (const key of keys) {
+      const value = record?.[key];
+      if (typeof value === "string" && value.trim() !== "") return value.trim();
+    }
+    return "";
+  };
+  const command = pick("command", "cmd", "pattern", "path", "file_path", "query", "url");
+  const oneLine = command.replace(/\s+/g, " ").slice(0, 90);
+  return oneLine === "" ? "" : oneLine;
 }
 
 export interface AttemptRecord {

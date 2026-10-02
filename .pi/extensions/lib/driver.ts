@@ -20,7 +20,7 @@ import type { AgentResult } from "./result.ts";
 import { withDefaults, type HarnessConfig } from "./config.ts";
 import { capabilitiesToTools } from "./capabilities.ts";
 import { buildBrief, summarisePrevious, type BriefContext } from "./brief.ts";
-import { executeStep, type ExecuteStepOptions, type ExecuteStepOutcome } from "./runner.ts";
+import { executeStep, type AgentEvent, type ExecuteStepOptions, type ExecuteStepOutcome } from "./runner.ts";
 import { readRequirementsFile } from "./requirements.ts";
 import { deserializeSuspended, serializeSuspended, type SuspendedPayload } from "./suspend.ts";
 
@@ -50,6 +50,8 @@ export interface DriverOptions {
   persist?: (payload: SuspendedPayload) => void;
   /** Called before each agent runs, so the caller can show progress. */
   onStep?: (agent: string, index: number) => void;
+  /** Called as the agent works. See `AgentEvent` in runner.ts. */
+  onEvent?: (agent: string, event: AgentEvent) => void;
   /** Aborting this stops the run between steps and kills the agent in flight. */
   signal?: AbortSignal;
 }
@@ -161,7 +163,12 @@ export async function runWorkflow(options: DriverOptions, start?: WorkflowState)
     if (!agent) return { state, stepCount, stopped: "aborted", reason: `phase ${phase} runs no agent` };
 
     if (options.onStep) options.onStep(agent, stepCount);
-    const outcome = await execute(buildStep(phase, agent, state, config, options, requirements));
+    const step = buildStep(phase, agent, state, config, options, requirements);
+    if (options.onEvent) {
+      const forward = (event: AgentEvent) => options.onEvent?.(agent, event);
+      step.onEvent = forward;
+    }
+    const outcome = await execute(step);
     if (options.signal?.aborted) {
       return { state, stepCount, stopped: "aborted", reason: "you stopped the workflow" };
     }

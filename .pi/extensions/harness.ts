@@ -31,7 +31,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earend
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { findModelRef, modelChoices, supportedReasoningLevels, type PiModel } from "./lib/runner.ts";
+import { findModelRef, modelChoices, supportedReasoningLevels, type AgentEvent, type PiModel } from "./lib/runner.ts";
 import { loadConfig, restoreFromEntries, runWorkflow, SUSPENSION_ENTRY, type RunOutcome } from "./lib/driver.ts";
 import { isTerminal } from "./lib/transitions.ts";
 import { validateConfig, formatChecks, hasErrors } from "./lib/validate.ts";
@@ -57,6 +57,37 @@ interface Harness {
   active: AbortController | null;
   /** What the live run is doing, for the status line. */
   phase: string | null;
+  /** Rolling activity of the agent in flight, for the live panel. */
+  activity: ActivityLine[];
+  /** One entry per finished agent: name, seconds, and what it said. */
+  timeline: { agent: string; seconds: number; note: string }[];
+}
+
+interface ActivityLine {
+  at: number;
+  icon: string;
+  text: string;
+}
+
+const WIDGET_KEY = "pi-minimal-harness-activity";
+const MAX_ACTIVITY = 8;
+
+/** Render the live panel. Cheap enough to call on every event. */
+function paint(ctx: ExtensionContext, harness: Harness): void {
+  const lines = harness.activity.slice(-MAX_ACTIVITY);
+  if (lines.length === 0) {
+    try {
+      ctx.ui.setWidget(WIDGET_KEY, undefined);
+    } catch {
+      // the session was replaced; the run continues without the panel
+    }
+    return;
+  }
+  try {
+    ctx.ui.setWidget(WIDGET_KEY, lines.map((l) => `${l.icon} ${l.text}`), { placement: "aboveEditor" });
+  } catch {
+    // same
+  }
 }
 
 async function configPath(cwd: string): Promise<string | null> {
@@ -116,8 +147,36 @@ function refresh(ui: ReturnType<typeof tolerantUi>, harness: Harness): void {
 }
 
 export default async function harnessExtension(pi: ExtensionAPI) {
-  const harness: Harness = { run: null, busy: false, running: false, active: null, phase: null };
+  const harness: Harness = {
+    run: null, busy: false, running: false, active: null, phase: null,
+    activity: [], timeline: [],
+  };
+
+  /** Record what an agent is doing, and put it on screen immediately. */
+  const onActivity = (ctx: ExtensionContext, event: AgentEvent, startedAt: number): void => {
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    let line: ActivityLine | null = null;
+    switch (event.kind) {
+      case "tool_start":
+        line = { at: seconds, icon: "…", text: event.detail ? `${event.tool}: ${event.detail}` : event.tool };
+        break;
+      case "tool_end":
+        line = { at: seconds, icon: event.ok ? "✓" : "✗", text: `${event.tool} ${event.ok ? "done" : "failed"}` };
+        break;
+      case "text": {
+        const first = event.text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0];
+        if (first) line = { at: seconds, icon: "›", text: first.slice(0, 100) };
+        break;
+      }
+      default:
+        line = null;
+    }
+    if (!line) return;
+    harness.activity = [...harness.activity, line].slice(-MAX_ACTIVITY * 2);
+    paint(ctx, harness);
+  };
   let runCounter = 0;
+  let stepStartedAt = Date.now();
 
   const driverOptions = (ctx: ExtensionContext, ui: ReturnType<typeof tolerantUi>, extra: Record<string, unknown> = {}) => ({
     task: harness.run?.state.task ?? "",
@@ -153,26 +212,40 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     harness.running = true;
     harness.active = new AbortController();
     harness.phase = "planner";
+    // Captured here because the finally below runs outside the try's scope.
+    let endedReason = "the workflow did not finish";
     try {
       const outcome = await runWorkflow({
         ...driverOptions(ctx, ui, {
           signal: harness.active.signal,
           onStep: (agent) => {
             harness.phase = agent;
+            harness.activity = [];
+            stepStartedAt = Date.now();
             refresh(ui, harness);
+            paint(ctx, harness);
           },
+          onEvent: (agent, event) => onActivity(ctx, event, stepStartedAt),
         }),
         task,
         runId: `run-${++runCounter}`,
         config: await loadConfig(file),
       } as Parameters<typeof runWorkflow>[0]);
       harness.run = outcome;
+      endedReason = outcome.reason;
       report(ui, outcome);
     } catch (error) {
       ui.notify(`The workflow failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
       harness.busy = false;
+      harness.activity = [];
+      harness.timeline = [...harness.timeline, {
+        agent: harness.phase ?? "workflow",
+        seconds: Math.round((Date.now() - stepStartedAt) / 1000),
+        note: endedReason.slice(0, 80),
+      }].slice(-12);
       refresh(ui, harness);
+      paint(ctx, harness);
     }
   };
 
@@ -210,6 +283,8 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     harness.running = true;
     harness.active = new AbortController();
     harness.phase = run.state.suspended?.resumeAgent ?? "resuming";
+    // Captured here because the finally below runs outside the try's scope.
+    let endedReason = "the workflow was resumed";
     try {
       const outcome = await runWorkflow(
         {
@@ -219,14 +294,19 @@ export default async function harnessExtension(pi: ExtensionAPI) {
             signal: harness.active.signal,
             onStep: (agent) => {
               harness.phase = agent;
+              harness.activity = [];
+              stepStartedAt = Date.now();
               refresh(ui, harness);
+              paint(ctx, harness);
             },
+            onEvent: (agent, event) => onActivity(ctx, event, stepStartedAt),
           }),
           config: await loadConfig(file),
         } as Parameters<typeof runWorkflow>[0],
         run.state,
       );
       harness.run = outcome;
+      endedReason = outcome.reason;
       report(ui, outcome);
       return true;
     } catch (error) {
@@ -238,7 +318,14 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       harness.busy = false;
       harness.active = null;
       harness.phase = null;
+      harness.activity = [];
+      harness.timeline = [...harness.timeline, {
+        agent: run.state.suspended?.resumeAgent ?? "workflow",
+        seconds: Math.round((Date.now() - stepStartedAt) / 1000),
+        note: endedReason.slice(0, 80),
+      }].slice(-12);
       refresh(ui, harness);
+      paint(ctx, harness);
     }
   };
 
