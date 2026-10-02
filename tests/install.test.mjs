@@ -60,7 +60,7 @@ test("init installs resources and is idempotent", async () => {
     assert.equal(first.status, 0, first.stderr);
     for (const relative of [
       ".pi/extensions/harness.ts",
-      "prompts/orchestrator.md",
+      "prompts/planner.md",
       ".agents/skills/github-delivery/SKILL.md",
       "harness.config.yaml",
       "pi-minimal-harness.md",
@@ -179,8 +179,10 @@ test("update replaces a pasted contract with the reference, init only notes it",
 
     // The contract the paste pointed at now lives in its own file, refreshed
     // by the same run.
+    // The refresh is verified by identity, not by a heading title: the shipped
+    // contract must equal the one in this repository, whatever it is called.
     const contract = await fs.readFile(path.join(project, "pi-minimal-harness.md"), "utf8");
-    assert.match(contract, /^## Harness workflow$/m);
+    assert.equal(contract, await fs.readFile(path.join(ROOT, "pi-minimal-harness.md"), "utf8"));
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
@@ -257,20 +259,18 @@ test("a fresh install reports the template placeholders it shipped", async () =>
   try {
     const result = runInstaller(["init", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /warning 5 agent\(s\) still use the template model placeholder/);
-    assert.match(result.stdout, /warning project: is still the template placeholder/);
+    assert.match(result.stdout, /warning 6 agent\(s\) still use the template model placeholder/);
 
     // Once the models are real the warning goes away, and dry-run shows it too.
     const config = path.join(project, "harness.config.yaml");
     await fs.writeFile(
       config,
-      (await fs.readFile(config, "utf8")).replace(/model: provider\/model-id/g, "model: opencode-go/gpt-5.1").replace("project: my-project", "project: my-app"),
+      (await fs.readFile(config, "utf8")).replace(/model: provider\/model-id/g, "model: opencode-go/gpt-5.1"),
       "utf8",
     );
     const after = runInstaller(["update", "--project", project, "--dry-run"]);
     assert.equal(after.status, 0, after.stderr);
     assert.doesNotMatch(after.stdout, /template model placeholder/);
-    assert.doesNotMatch(after.stdout, /template placeholder/);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
@@ -286,9 +286,10 @@ test("init ships the contract with its preamble commented, and creates a changel
     // The preamble is documentation for whoever reads the file, not an
     // instruction for an agent, so everything above the first section is
     // inside an HTML comment.
-    const preamble = contract.slice(0, contract.indexOf("## Harness workflow"));
+    const firstHeading = contract.search(/^## /m);
+    assert.ok(firstHeading > 0, "the contract must have a first `##` heading");
+    const preamble = contract.slice(0, firstHeading);
     assert.equal(preamble.replace(/<!--[\s\S]*?-->/g, "").replace(/---/g, "").trim(), "");
-    assert.match(contract, /^## Harness workflow$/m);
     // The whole file is the contract now: there is no slice to take.
     assert.doesNotMatch(contract, /Two ways to adopt/);
 
@@ -324,14 +325,14 @@ test("update adds missing keys and never overwrites local values", async () => {
 
     const result = runInstaller(["update", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /add defaults\.auto_harness in harness\.config\.yaml/);
+    assert.match(result.stdout, /add harness in harness\.config\.yaml/);
     assert.match(result.stdout, /existing values untouched/);
 
     const merged = await fs.readFile(config, "utf8");
     assert.match(merged, /^project: local-project$/m);
     assert.match(merged, /^ {2}workflow_mode: full$/m);
-    assert.match(merged, /^ {2}auto_harness: true$/m);
-    assert.match(merged, /^ {2}preflight_policy: advisory$/m);
+    assert.match(merged, /^ {2}version: 2$/m);
+    assert.match(merged, /^ {2}max_retries: 3$/m);
     assert.match(merged, /^ {2}my_own_key: keep-me$/m);
     assert.match(merged, /^ {4}steps:\n {6}- only-me$/m);
     // The local sequence is kept verbatim: nothing is inserted into it and it
@@ -372,7 +373,7 @@ test("update --dry-run reports additions without writing", async () => {
     const result = runInstaller(["update", "--project", project, "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Dry run/);
-    assert.match(result.stdout, /add defaults\./);
+    assert.match(result.stdout, /add harness /);
     assert.equal(await fs.readFile(config, "utf8"), LOCAL_CONFIG);
     assert.equal(await exists(`${config}.bak`), false);
   } finally {
@@ -389,10 +390,10 @@ test("init adds missing keys to an existing config without --force", async () =>
 
     const result = runInstaller(["init", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /add defaults\./);
+    assert.match(result.stdout, /add harness /);
     const merged = await fs.readFile(config, "utf8");
     assert.match(merged, /^ {2}workflow_mode: full$/m);
-    assert.match(merged, /^ {2}auto_harness: true$/m);
+    assert.match(merged, /^ {2}version: 2$/m);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
@@ -403,7 +404,7 @@ test("update replaces upstream files and keeps the local indentation width", asy
   try {
     assert.equal(runInstaller(["init", "--project", project]).status, 0);
     const extension = path.join(project, ".pi", "extensions", "harness.ts");
-    const prompt = path.join(project, "prompts", "orchestrator.md");
+    const prompt = path.join(project, "prompts", "planner.md");
     const contract = path.join(project, "pi-minimal-harness.md");
     await fs.writeFile(extension, "local change\n", "utf8");
     await fs.writeFile(prompt, "stale prompt\n", "utf8");
@@ -417,15 +418,28 @@ test("update replaces upstream files and keeps the local indentation width", asy
     assert.match(result.stdout, /replace .*pi-minimal-harness\.md/);
     assert.equal(
       await fs.readFile(prompt, "utf8"),
-      await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8"),
+      await fs.readFile(path.join(ROOT, "prompts", "planner.md"), "utf8"),
     );
     assert.equal(
       await fs.readFile(contract, "utf8"),
       await fs.readFile(path.join(ROOT, "pi-minimal-harness.md"), "utf8"),
     );
+    // The runtime imports .pi/extensions/lib/. Without this an adopter gets an
+    // extension whose every import fails.
+    for (const module of ["transitions.ts", "state.ts", "result.ts", "runner.ts", "driver.ts", "suspend.ts", "brief.ts", "escalation.ts", "capabilities.ts", "extract.ts", "config.ts", "validate.ts", "settings.ts", "requirements.ts", "changelog.ts"]) {
+      const shipped = path.join(project, ".pi", "extensions", "lib", module);
+      assert.equal(await fs.access(shipped).then(() => true, () => false), true, `lib/${module} was not installed`);
+    }
+    // An allowlist, not a pattern: nothing else from prompts/ may ship.
+    const installedPrompts = (await fs.readdir(path.join(project, "prompts"))).sort();
+    assert.deepEqual(
+      installedPrompts,
+      ["deliverer.md", "explorer.md", "implementer.md", "planner.md", "reviewer.md", "tester.md"],
+      `unexpected prompts installed: ${installedPrompts.join(", ")}`,
+    );
     const merged = await fs.readFile(config, "utf8");
     assert.match(merged, /^ {4}workflow_mode: full$/m);
-    assert.match(merged, /^ {4}auto_harness: true$/m);
+    assert.match(merged, /^ {2}version: 2$/m);
     const agents = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
     assert.equal((agents.match(/<!-- BEGIN pi-minimal-harness -->/g) ?? []).length, 1);
     assert.match(agents, /^## pi-minimal-harness instructions$/m);
