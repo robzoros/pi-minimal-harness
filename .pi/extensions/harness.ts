@@ -177,8 +177,25 @@ export async function resolveConfigPath(cwd: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * Decode a text file, tolerating a UTF-16 BOM. Editors on Windows sometimes
+ * save the YAML as UTF-16; read as utf8 that yields NUL-interleaved garbage
+ * and the config parses as empty ("No agents found in the configuration").
+ */
+function decodeText(bytes: Buffer): string {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return bytes.subarray(2).toString("utf16le");
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const swapped = Buffer.from(bytes.subarray(2));
+    swapped.swap16();
+    return swapped.toString("utf16le");
+  }
+  return bytes.toString("utf8").replace(/^\uFEFF/, "");
+}
+
 export async function readLines(configPath: string): Promise<string[]> {
-  const text = await fs.readFile(configPath, "utf8");
+  const text = decodeText(await fs.readFile(configPath));
   return text.split(/\r?\n/);
 }
 
