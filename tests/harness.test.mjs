@@ -66,6 +66,7 @@ cfgText = cfgText
   .replace(/(^ {2}delivery:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1low");
 await fs.writeFile(cfgPath, cfgText);
 await fs.cp(path.join(ROOT, "prompts"), path.join(tmp, "prompts"), { recursive: true });
+await fs.cp(path.join(ROOT, ".agents"), path.join(tmp, ".agents"), { recursive: true });
 await fs.copyFile(path.join(ROOT, "pi-minimal-harness.md"), path.join(tmp, "pi-minimal-harness.md"));
 
 // --- fakes -------------------------------------------------------------------
@@ -1010,6 +1011,13 @@ assistantScript.push("el explorador sigue sin informe");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea", waitTurn, "full-dry-run");
 check("report: an intermediate step is verified", sent.length === 3, `got ${sent.length}`);
 check("report: the repair prompt names the step", sent[2]?.includes('"explorer"'), String(sent[2]).slice(0, 90));
+// The repair turn must quote the sections the *step's own* prompt requires:
+// an explorer owes `### Findings`, not the implementer's `### Changes`.
+check(
+  "report: the repair prompt names the step's own sections, not the implementer's",
+  sent[2]?.includes("### Findings") && !sent[2]?.includes("### Evidence"),
+  String(sent[2]).slice(0, 160),
+);
 check(
   "report: the pipeline stops when a step still omits the marker",
   notifies.some((n) => n.includes("did not report") && n.includes("explorer")),
@@ -1197,6 +1205,27 @@ check(
   JSON.stringify(mod.getAgentTools(["agents:", "  x:", "    model: p/m"], "x")) === "[]" &&
     JSON.stringify(mod.getAgentTools(cfgLines, "no-such-agent")) === "[]",
 );
+check(
+  "config: the delivery agent declares the github-delivery skill",
+  JSON.stringify(mod.getAgentSkills(cfgLines, "delivery")) === '["github-delivery"]' &&
+    JSON.stringify(mod.getAgentSkills(cfgLines, "orchestrator")) === "[]",
+  JSON.stringify(mod.getAgentSkills(cfgLines, "delivery")),
+);
+check(
+  "config: a declared skill resolves to its SKILL.md",
+  (mod.resolveSkillPath(tmp, cfgPath, "github-delivery", cfgLines) ?? "").endsWith(path.join("github-delivery", "SKILL.md")),
+  String(mod.resolveSkillPath(tmp, cfgPath, "github-delivery", cfgLines)),
+);
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory" }));
+reset();
+assistantTextOverride = "Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE";
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "entrega", waitTurn, "full");
+assistantTextOverride = null;
+check(
+  "skills: the delivery step receives its declared skill content in the step message",
+  sent.length === 5 && sent[4].includes("# GitHub Delivery"),
+  `sent=${sent.length} has=${sent[4]?.includes("# GitHub Delivery")}`,
+);
 // The example config is what `init` copies into an adopting project.
 const exampleLines = (await fs.readFile(path.join(ROOT, "harness.config.example.yaml"), "utf8")).split("\n");
 check(
@@ -1246,6 +1275,7 @@ const completeReport = {
   checks: [{ command: "node tests/harness.test.mjs", result: "passed" }],
   lessons: [],
   notes: "",
+  verdict: null,
 };
 check("gaps: a complete report has no gaps", mod.reportGaps(completeReport, "").length === 0);
 check("gaps: [] counts as a delivered field, not as a gap", mod.reportGaps(completeReport, "sin marker").length === 0);
@@ -1261,6 +1291,24 @@ check(
 );
 check("gaps: no report at all is a gap", JSON.stringify(mod.reportGaps(null, "")) === '["harness_report call"]');
 check("gaps: the HARNESS-DONE fallback cannot be inspected, so it always counts", mod.reportGaps(null, "texto\n\nHARNESS-DONE").length === 0);
+check(
+  "gaps: a report without notes is a gap",
+  JSON.stringify(mod.reportGaps({ ...completeReport, notes: null }, "")) === '["notes"]',
+  JSON.stringify(mod.reportGaps({ ...completeReport, notes: null }, "")),
+);
+check(
+  "gaps: HARNESS-DONE only counts on the last non-empty line",
+  JSON.stringify(mod.reportGaps(null, "HARNESS-DONE\nmore text")) === '["harness_report call"]' &&
+    mod.reportGaps(null, "texto\n\nHARNESS-DONE\n   ").length === 0,
+);
+check(
+  "verdict: normalized case-insensitively, unknown reads as none",
+  mod.normalizeVerdict("blocked") === "blocked" &&
+    mod.normalizeVerdict("PROCEED WITH CHANGES") === "proceed_with_changes" &&
+    mod.normalizeVerdict("Proceed") === "proceed" &&
+    mod.normalizeVerdict("nope") === null &&
+    mod.normalizeVerdict(42) === null,
+);
 check(
   "lessons: a bare string, blanks and a non-list are normalized",
   JSON.stringify(mod.normalizeLessons(" una")) === '["una"]' &&
@@ -1328,6 +1376,123 @@ check(
   sent.length === 3 && notifies.some((n) => n.includes("did not report") && n.includes("lessons")),
   `${sent.length} | ${notifies.join(" | ")}`,
 );
+
+// --- critic verdict: BLOCKED stops the pipeline before the mutating steps ----
+
+reset();
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory" }));
+const blockedRun = waitTurnInjecting([
+  {
+    after: 2,
+    call: {
+      name: "harness_report",
+      params: { changed_files: [], checks: [], notes: "", lessons: [], verdict: "BLOCKED" },
+    },
+  },
+]);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "plan bloqueado", blockedRun, "full");
+check("verdict: BLOCKED stops the pipeline before the implementer", sent.length === 3, `got ${sent.length}`);
+check(
+  "verdict: the critic report is signalled as the final answer",
+  notifies.some((n) => n.includes("BLOCKED") && n.includes("final answer")),
+  notifies.join(" | "),
+);
+check(
+  "verdict: no implementer or delivery step ran",
+  !sent.some((s) => s.includes("implementer") || s.includes("delivery")),
+  sent.map((s) => s.slice(0, 40)).join(" | "),
+);
+
+// --- step context: the previous step's reply is quoted, not assumed ----------
+
+const explorerPrompt = await fs.readFile(path.join(tmp, "prompts", "explorer.md"), "utf8");
+check(
+  "sections: the explorer template yields its own report sections",
+  mod.reportSectionsFromTemplate(explorerPrompt).join("|").includes("### Findings") &&
+    !mod.reportSectionsFromTemplate(explorerPrompt).includes("### Changes"),
+  mod.reportSectionsFromTemplate(explorerPrompt).join(" / "),
+);
+check(
+  "previous: an absent previous reply says so explicitly",
+  mod.formatPreviousStepOutput(null) === "none (this step has no prior output)" &&
+    mod.formatPreviousStepOutput("   ") === "none (this step has no prior output)",
+  mod.formatPreviousStepOutput(null),
+);
+const capped = mod.formatPreviousStepOutput("y".repeat(9000));
+check(
+  "previous: a long previous reply is bounded and says how much was omitted",
+  capped.startsWith("y".repeat(4096)) && capped.includes("[") && capped.includes("chars omitted]"),
+  `${capped.length} chars`,
+);
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory" }));
+reset();
+assistantScript.push("Plan.\n\nHARNESS-DECISION: PIPELINE");
+assistantScript.push("### Changes\n- a.ts\n\nHARNESS-DONE");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea", waitTurn);
+check(
+  "previous: the second step is handed the first step's reply, not a literal",
+  sent[1]?.includes("Plan.") && !sent[1]?.includes("{{previous}}: from this conversation"),
+  String(sent[1]).slice(0, 140),
+);
+
+// --- dispatch: project rules reach the subagent, the first step does not -----
+
+const dispatchTmp = await fs.mkdtemp(path.join(os.tmpdir(), "harness-dispatch-ctx-"));
+const agentPromptPath = path.join(dispatchTmp, "prompt.md");
+const contractPath2 = path.join(dispatchTmp, "contract.md");
+await fs.writeFile(agentPromptPath, "# Explorer\n\n## Task\n{{task}}\n\n### Findings\nwhat exists\n");
+await fs.writeFile(contractPath2, "HARNESS CONTRACT\n");
+const basePrompt = await mod.composeDispatchSystemPrompt({
+  templatePath: agentPromptPath,
+  contractPath: contractPath2,
+  agent: "explorer",
+  brief: "Objetivo\n\nmore context",
+});
+check(
+  "dispatch: without an AGENTS.md the system prompt is template + contract",
+  basePrompt.includes("### Findings") && basePrompt.includes("HARNESS CONTRACT") && !basePrompt.includes("Project rules ("),
+  basePrompt.slice(0, 80),
+);
+await fs.writeFile(path.join(dispatchTmp, "AGENTS.md"), "PROJECT RULE: never touch generated files.\n");
+const withRules = await mod.composeDispatchSystemPrompt({
+  templatePath: agentPromptPath,
+  contractPath: contractPath2,
+  projectRulesPath: path.join(dispatchTmp, "AGENTS.md"),
+  agent: "explorer",
+  brief: "Objetivo",
+});
+check(
+  "dispatch: the project's AGENTS.md is injected last and wins on conflict",
+  withRules.includes("PROJECT RULE: never touch generated files.") &&
+    withRules.indexOf("Project rules (") > withRules.indexOf("HARNESS CONTRACT") &&
+    withRules.includes("these win"),
+  String(withRules.indexOf("Project rules (")),
+);
+const withSkill = await mod.composeDispatchSystemPrompt({
+  templatePath: agentPromptPath,
+  contractPath: contractPath2,
+  skillBodies: ["SKILL BODY: stage only the reported paths."],
+  agent: "delivery",
+  brief: "Objetivo",
+});
+check(
+  "dispatch: declared skills are injected into the subagent system prompt",
+  withSkill.includes("Project skill(s) for this agent:") && withSkill.includes("SKILL BODY: stage only the reported paths."),
+  withSkill.slice(0, 120),
+);
+check(
+  "dispatch: project rules are found at the project root",
+  mod.resolveProjectRulesPath(undefined, dispatchTmp) === path.join(dispatchTmp, "AGENTS.md") &&
+    mod.resolveProjectRulesPath(undefined, tmp) === null,
+  String(mod.resolveProjectRulesPath(undefined, dispatchTmp)),
+);
+check(
+  "dispatch: the pipeline's first step cannot be dispatched, leaf agents can",
+  (mod.dispatchUnsupportedAgent("orchestrator", cfgLines) ?? "").includes("cannot run as a dispatched subagent") &&
+    mod.dispatchUnsupportedAgent("explorer", cfgLines) === null,
+  String(mod.dispatchUnsupportedAgent("orchestrator", cfgLines)).slice(0, 80),
+);
+await fs.rm(dispatchTmp, { recursive: true, force: true });
 
 // A report sent by the orchestrator never stands in for the next step's report.
 reset();

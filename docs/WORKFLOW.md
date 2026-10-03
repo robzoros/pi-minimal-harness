@@ -17,7 +17,7 @@ external API service.
 User requests task
       |
       v
-[1] Orchestrator analyzes the request and creates the next-agent prompt
+[1] Orchestrator analyzes the request and prepares the handoff
       |
       v
 [2] Explorer agent investigates possible solutions
@@ -46,10 +46,12 @@ Responsibilities:
 
 - classify the task;
 - choose the workflow mode;
-- decide whether OpenSpec is needed;
-- decide whether Engram should be queried;
-- decide whether structural code exploration is useful;
-- create the prompt for the explorer or implementer;
+- decide whether Engram should be queried (OpenSpec is the explorer's and the
+  critic's tool, not the orchestrator's);
+- size the task with structural code exploration when it helps, without taking
+  over the explorer's deep dive;
+- identify (or create) the single issue the work closes, when the repository
+  requires issue-linked pull requests;
 - preserve the user's intent without over-expanding the task.
 
 Expected output:
@@ -57,8 +59,9 @@ Expected output:
 - selected workflow mode;
 - task summary;
 - constraints;
-- relevant context requests;
-- next-agent prompt.
+- handoff for the next step (files/areas, acceptance criteria, issue number,
+  verification evidence already available);
+- open questions.
 
 ### 2. Explorer Agent
 
@@ -101,7 +104,8 @@ Expected output:
 - improvement notes;
 - risks or blockers;
 - recommended refinements;
-- approval to implement or request for more exploration.
+- a verdict: `PROCEED`, `PROCEED WITH CHANGES` or `BLOCKED`. The harness stops
+  the pipeline on `BLOCKED` and the critic report becomes the final answer.
 
 ### 4. Implementer Agent
 

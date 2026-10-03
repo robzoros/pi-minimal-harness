@@ -26,9 +26,11 @@ Dispatched subagents (the `harness-dispatch` tool) receive this file as their
 contract, resolved by existence in this order: `defaults.subagent_context_file`
 when it is set and resolves, this `pi-minimal-harness.md`, an `AGENTS.md`
 carrying the harness block, and finally a legacy `AGENTS-addition.md`. The
-pipeline steps do not depend on that chain at all: they get the project's
-`AGENTS.md` through Pi's normal mechanism, and the reference section above tells
-them to read this file.
+subagent's system prompt is its own prompt template, its declared project
+skills, that contract, and the project's `AGENTS.md` when the project has one —
+read last, so project rules win on conflict. The pipeline steps do not depend on
+that chain at all: they get the project's `AGENTS.md` through Pi's normal
+mechanism, and the reference section above tells them to read this file.
 -->
 
 ---
@@ -39,6 +41,14 @@ them to read this file.
   selects an ordered list of agent steps; the runtime sequences them, so steps
   cannot be skipped. Modes: `simple`, `full-dry-run`, `full`,
   `implementation-only`, `delivery-only` (see `defaults.workflow_mode`).
+  Each step is sent a pointer to its prompt template plus the values of the
+  placeholders, including `{{previous}}`: the previous step's reply, quoted and
+  bounded. An agent whose step never ran sees `none (this step has no prior
+  output)` there.
+- A step can also be stopped before it starts: with
+  `defaults.preflight_policy: blocking` a dirty tree or an open pull request
+  holds back the first step whose agent is marked `mutates_files: true`, and
+  the harness reports the blocker instead of sending the step.
 - Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
   supported reasoning effort), `/harness-run <task>`, `/harness-delivery
   [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
@@ -51,14 +61,16 @@ them to read this file.
   moves the decision to the footer; it is not part of the visible answer. With
   `defaults.strict_decision_marker` on, a turn with no usable decision stops the
   pipeline instead of assuming `PIPELINE`.
-- Every non-orchestrator agent writes a report in the form `### Changes` /
-  `### Evidence` / `### Notes for delivery` / `### Lessons` **and** calls
-  `harness_report` with `changed_files`, `checks`, `notes` and `lessons`.
-  Without the tool, the fallback is `HARNESS-DONE` as the last line. All four
-  fields are required and `[]` is how a field with nothing in it is passed, so
-  an omitted field is an incomplete report: the harness sends one repair turn
-  for that step, naming the missing field, and stops if it is still
-  incomplete.
+- Every non-orchestrator agent writes the report its own prompt template asks
+  for and calls `harness_report` with `changed_files`, `checks`, `notes` and
+  `lessons` (the critic also passes its `verdict`: `PROCEED`,
+  `PROCEED WITH CHANGES` or `BLOCKED`). Without the tool, the fallback is
+  `HARNESS-DONE` as the last line. All four fields are required: `[]` is how an
+  empty list is passed and `""` how empty notes are passed, so an omitted field
+  is an incomplete report — the harness sends one repair turn for that step,
+  naming the missing field, and stops if it is still incomplete. A `BLOCKED`
+  verdict stops the pipeline before the file-mutating steps and the critic's
+  report becomes the final answer.
 - Reports are evidence-based: name the files changed, the checks actually run,
   and every check that could not be run.
 - Explore before editing. The agents are granted CodeGraph and Engram for

@@ -5,8 +5,10 @@ defaults:
   auto_harness: true
   question_short_circuit: true
   allow_dispatch: true
-  subagent_context_file: AGENTS-addition.md
+  subagent_context_file: pi-minimal-harness.md
   allow_simple_mode: true
+  strict_decision_marker: true
+  preflight_policy: advisory
 
 commands:
   preferred_interface: slash
@@ -45,20 +47,27 @@ workflows:
 
 agents:
   orchestrator:
-    model: opencode-go/mimo-v2.6-flash
+    model: opencode-go/space-bunny-free
     reasoning: medium
+    mutates_files: false
     tools:
       - filesystem
       - engram
+      - codegraph
+      # The orchestrator identifies (or creates) the issue the delivery step
+      # must close, so it needs the GitHub tool as well.
+      - github
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task
       - select_workflow_mode
       - prepare_next_agent_prompt
+      - record_findings_with_engram
 
   explorer:
-    model: gpt-5.1
+    model: opencode-go/space-bunny-free
     reasoning: high
+    mutates_files: false
     tools:
       - filesystem
       - openspec
@@ -69,10 +78,12 @@ agents:
       - explore_repository
       - identify_relevant_files
       - propose_solution
+      - record_findings_with_engram
 
   critic:
-    model: gpt-5.1-mini
-    reasoning: medium
+    model: opencode-go/space-bunny-free
+    reasoning: high
+    mutates_files: false
     tools:
       - filesystem
       - openspec
@@ -83,22 +94,27 @@ agents:
       - suggest_simpler_approach
 
   implementer:
-    model: gpt-5.1
+    model: opencode-go/space-bunny-free
     reasoning: high
+    mutates_files: true
     tools:
       - filesystem
       - shell
       - tests
       - engram
+      - codegraph
     prompt_template: prompts/implementer.md
     responsibilities:
+      - check_dependents_before_editing_shared_symbols
       - edit_files
       - run_checks
       - inspect_diff
+      - record_findings_with_engram
 
   delivery:
-    model: gpt-5.1-mini
+    model: opencode-go/longcat-2.5-preview-free
     reasoning: low
+    mutates_files: true
     tools:
       - git
       - github
