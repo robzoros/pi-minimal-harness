@@ -515,17 +515,16 @@ async function findExistingInstall(project) {
  * missing file is created: it belongs to the project, like its changelog, and
  * is never touched again — so it must stay out of the harness-owned set that
  * `update` replaces.
+ *
+ * The shape comes from `defaults.requirements_format` (REQ-006). The harness
+ * never parses this file, so the format is a convention the project picks
+ * rather than a harness setting with consequences: `sections` keeps the three
+ * headings this installer has always emitted, and `req-n` adds one `### REQ-nnn`
+ * block per requirement. An unknown value reads as `sections`, so a typo cannot
+ * break an install.
  */
-async function ensureRequirements(project, options, report) {
-  const destination = path.join(project, "REQUIREMENTS.md");
-  const relative = path.relative(project, destination) || destination;
-  if (await pathExists(destination)) {
-    report.push(`unchanged ${relative} (project requirements kept)`);
-    return;
-  }
-  report.push(`create ${relative} (empty: the architect fills it during design)`);
-  if (options.dryRun) return;
-  const heading = [
+const REQUIREMENTS_HEADINGS = {
+  sections: [
     "# Requirements",
     "",
     "The formal scope of the work in design, maintained by the architect.",
@@ -536,8 +535,71 @@ async function ensureRequirements(project, options, report) {
     "",
     "## Out of scope",
     "",
-  ].join("\n");
-  await fs.writeFile(destination, heading, "utf8");
+  ],
+  "req-n": [
+    "# Requirements",
+    "",
+    "The formal scope of the work in design, maintained by the architect.",
+    "",
+    "Each requirement is a block: an ID that sorts (`REQ-001`, `REQ-002`, …), a",
+    "statement of what the harness shall do, the rationale, an acceptance",
+    "checklist of things a check can settle, and the files that implement it.",
+    "",
+    "## Additions",
+    "",
+    "### REQ-001 — <title>",
+    "- **Statement**: While <context>, the harness shall <behaviour>.",
+    "- **Rationale**: <why this matters>.",
+    "- **Acceptance**:",
+    "  - [ ] <something a check can settle>",
+    "- **Traces**: `<path that implements it>`",
+    "- **Priority**: P1",
+    "",
+    "## Modifications",
+    "",
+    "## Out of scope",
+    "",
+  ],
+};
+
+/**
+ * Read a scalar from the project's configuration. The `defaults:` section is
+ * not located explicitly: these keys are two-space indented wherever they sit,
+ * and only `defaults:` declares them.
+ */
+async function readConfigString(project, key) {
+  try {
+    const text = await fs.readFile(path.join(project, "harness.config.yaml"), "utf8");
+    const match = new RegExp(`^ {2}${key}:\\s*"?([^"\\s]+)"?\\s*$`, "m").exec(text);
+    return match?.[1] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** `defaults.requirements_format`, normalised to a shape we can write. */
+async function readRequirementsFormat(project) {
+  const value = (await readConfigString(project, "requirements_format")).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(REQUIREMENTS_HEADINGS, value) ? value : "sections";
+}
+
+async function ensureRequirements(project, options, report) {
+  const format = await readRequirementsFormat(project);
+  // Honour the configured name, including a directory in it: writing a literal
+  // REQUIREMENTS.md while the architect looks at `docs/REQ.md` is the bug.
+  const configured = await readConfigString(project, "requirements_file");
+  const destination = path.join(project, configured || "REQUIREMENTS.md");
+  const relative = path.relative(project, destination) || destination;
+  if (await pathExists(destination)) {
+    report.push(`unchanged ${relative} (project requirements kept)`);
+    return;
+  }
+  report.push(`create ${relative} (${format}: empty, the architect fills it during design)`);
+  if (options.dryRun) return;
+  // The configured name may carry a directory (`docs/REQ.md`), so the parent
+  // cannot be assumed to exist: init is the step that creates the layout.
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.writeFile(destination, REQUIREMENTS_HEADINGS[format].join("\n"), "utf8");
 }
 
 /**

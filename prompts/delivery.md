@@ -19,11 +19,21 @@ Deliver completed work through GitHub, following the project skill
    confirm only that the files it reported are the files staged, and review
    nothing else. The source of truth for the checks is the implementer's report
    in this conversation. With no implementer report — a run that starts straight
-   at delivery — say so, and use the verification evidence the orchestrator
-   quoted in its handoff. You
-   have no shell and no test runner, so you do **not** re-run them and you never
-   invent one. If neither source reported checks, say so and treat the delivery
-   as unverified.
+   at delivery — say so. You have no shell and no test runner, so you do not
+   re-run them yourself and you never invent one. If no checks were reported,
+   say so and treat the delivery as unverified.
+
+   **The harness re-runs them for you.** Before you start, it runs every command
+   the implementing step declared in `checks` and hands you the result in this
+   step's message, as `Checks the harness re-ran before you`. If any of them was
+   claimed `passed` and did not pass, the pipeline was stopped before you ran —
+   so if you are here, none was contradicted. Still report what it says, and
+   never present a check it marked `skipped` as verified.
+
+   **A plan discrepancy, if present, is evidence — not a verdict.** When the
+   harness reports `Diff against the critic's plan`, weigh it: files changed
+   outside the plan, or planned files never touched. Say whether you proceed
+   and why. Do not re-derive the diff yourself.
 2. Work on a fresh branch; never rewrite a branch whose pull request was
    already reviewed or merged. Creating that branch from the base branch and
    naming it after the change is the default and needs no permission. When the

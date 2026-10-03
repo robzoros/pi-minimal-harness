@@ -44,6 +44,8 @@ const MODES: Array<{ id: string; steps: string; when: string }> = [
 const ANALYSIS_MODE = "analysis";
 /** The conceptual agent: it talks to the user and holds the requirements file. */
 const ARCHITECT_AGENT = "architect";
+/** The agent that delivers: the one whose preconditions the harness now checks. */
+const DELIVERY_AGENT = "delivery";
 const MODE_IDS = MODES.map((m) => m.id);
 const REQUIRED_AGENTS = ["architect", "orchestrator", "explorer", "critic", "implementer", "delivery"];
 const STATUS_KEY = "corpustory-harness-mode";
@@ -78,15 +80,17 @@ let pipelineActive = false;
 /**
  * True while the architect holds a multi-turn session: the user's next inputs
  * go straight to it, without the orchestrator routing again. Only the architect
- * arms and disarms it (harness_session) — the router never does, so an ordinary
- * question gets one architect turn and no trap.
+ * opens it, with `harness_session(START)`, and only `/harness-end` closes it:
+ * the model has no way to close a session, so an ordinary question still gets
+ * one architect turn and no trap, and a design ends when the user says so.
  */
 let inArchitectSession = false;
 
 /**
- * What the architect asked for this turn: true to keep the session open, false
- * to close it, null when it said nothing. The tool assigns it unconditionally
- * and the driver applies it once the turn ends.
+ * What the architect asked for this turn: true to keep the session open, null
+ * when it said nothing. There is no `false` any more — closing a session is the
+ * user's gesture, never the model's. The tool assigns it unconditionally and the
+ * driver applies it once the turn ends.
  */
 let lastSessionChoice: boolean | null = null;
 
@@ -98,6 +102,12 @@ export type HarnessVerdict = "proceed" | "proceed_with_changes" | "blocked" | nu
 export interface HarnessReport {
   /** null when the field was omitted; [] when it was passed with nothing in it. */
   changedFiles: string[] | null;
+  /**
+   * The paths the critic expects the implementation to touch. Null when the
+   * field was omitted, [] when the critic expects none. Nothing reads it yet —
+   * REQ-003 ships the field now and the comparison with the diff with it.
+   */
+  plannedPaths: string[] | null;
   checks: { command: string; result: CheckResult }[] | null;
   lessons: string[] | null;
   /** null when the field was omitted; "" is the explicit "nothing to tell delivery". */
@@ -157,11 +167,20 @@ export function normalizeLessons(value: unknown): string[] | null {
 let lastProgress: string | null = null;
 
 /** Compose the footer status text: mode, optional pipeline progress, decision, auto state. */
-function formatStatus(mode: string | null, auto: boolean, progress?: string, decision?: HarnessDecision): string {
+function formatStatus(
+  mode: string | null,
+  auto: boolean,
+  progress?: string,
+  decision?: HarnessDecision,
+  session?: boolean,
+): string {
   const parts = [`harness: ${mode ?? "none"}`];
   if (progress) parts.push(progress);
   if (decision) parts.push(`decision: ${decision}`);
   parts.push(`auto: ${auto ? "on" : "off"}`);
+  // An open session is the user's to close, so the footer names the command
+  // that closes it: otherwise there is no discoverable way out of it.
+  if (session) parts.push("design open — /harness-end to finish");
   return parts.join(" · ");
 }
 
@@ -174,7 +193,16 @@ async function refreshModeStatus(ctx: ExtensionContext): Promise<void> {
       return;
     }
     const lines = await readLines(configPath);
-    ctx.ui.setStatus(STATUS_KEY, formatStatus(getWorkflowMode(lines), isAutoHarness(lines), lastProgress ?? undefined, displayDecision));
+    ctx.ui.setStatus(
+      STATUS_KEY,
+      formatStatus(
+        getWorkflowMode(lines),
+        isAutoHarness(lines),
+        lastProgress ?? undefined,
+        displayDecision,
+        inArchitectSession,
+      ),
+    );
   } catch {
     ctx.ui.setStatus(STATUS_KEY, undefined);
   }
@@ -515,6 +543,62 @@ export function getRequirementsFile(lines: string[]): string {
   return getDefaultString(lines, "requirements_file", "REQUIREMENTS.md");
 }
 
+export type RequirementsFormat = "sections" | "req-n";
+
+/**
+ * `defaults.requirements_format`: the shape the installer writes when it creates
+ * a missing requirements file. `sections` is the three empty headings the
+ * installer has always emitted; `req-n` is one `### REQ-nnn` block per
+ * requirement, with `Acceptance` and `Traces` and the optional `Statement`,
+ * `Rationale` and `Priority`. Anything else reads as `sections`, so a typo can
+ * never break an install.
+ */
+export function getRequirementsFormat(lines: string[]): RequirementsFormat {
+  return getDefaultString(lines, "requirements_format", "sections").toLowerCase() === "req-n" ? "req-n" : "sections";
+}
+
+/**
+ * Write `defaults.requirements_format`, adding the key when the configuration
+ * predates it. Indentation-aware like every other setter here, so a user's
+ * formatting survives.
+ */
+export function setRequirementsFormat(lines: string[], format: RequirementsFormat): string[] {
+  const section = topLevelSection(lines, "defaults");
+  if (!section) return lines;
+  const next = [...lines];
+  const pattern = /^ {2}requirements_format:\s*\S+\s*$/;
+  for (let i = section.start; i < section.end; i++) {
+    if (pattern.test(next[i])) {
+      next[i] = `  requirements_format: ${format}`;
+      return next;
+    }
+  }
+  // Anchor after requirements_file when the configuration has it, so the key
+  // lands next to the file it describes instead of at the top of the section.
+  let anchor = -1;
+  for (let i = section.start; i < section.end; i++) {
+    if (/^ {2}requirements_file:/.test(next[i])) {
+      anchor = i;
+      break;
+    }
+  }
+  const insertAt = anchor >= 0 ? anchor + 1 : section.start + 1;
+  next.splice(insertAt, 0, `  requirements_format: ${format}`);
+  return next;
+}
+
+/**
+ * `defaults.check_timeout_ms`: how long a check declared in a step report may
+ * run before the harness gives up on it (REQ-002). Deliberately not
+ * REPOSITORY_COMMAND_TIMEOUT_MS: that one stays short for the preflight's git
+ * probes, which must not hold a pipeline up, while a test suite legitimately
+ * takes seconds.
+ */
+export function checkTimeoutMs(lines: string[]): number {
+  const parsed = Number.parseInt(getDefaultString(lines, "check_timeout_ms", "300000"), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 300_000;
+}
+
 /**
  * When true, a missing or ambiguous decision marker stops the pipeline instead
  * of being read as "not ANSWER_ONLY" (which would run the file-mutating steps
@@ -742,42 +826,6 @@ export function supportedReasoningLevels(model: PiModel): ReasoningLevelArg[] {
 type HarnessDecision = "answer_only" | "pipeline" | null;
 
 const DECISION_MARKER = /HARNESS-DECISION:\s*(ANSWER_ONLY|PIPELINE)/gi;
-
-/** Fallback for prompts that have not migrated to the `harness_session` tool. */
-const SESSION_MARKER = /HARNESS-SESSION:\s*(START|END)/gi;
-
-export interface SessionLineSplit {
-  /** true = start the session, false = end it, null = the line was ambiguous. */
-  active: boolean | null;
-  rest: string;
-  hadMarker: boolean;
-}
-
-/**
- * The session marker on the last line with text, exactly like the decision
- * marker: only there, so naming it in prose never arms or ends a session.
- */
-export function splitSessionLine(text: string): SessionLineSplit {
-  const lines = text.split("\n");
-  let idx = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].trim()) {
-      idx = i;
-      break;
-    }
-  }
-  if (idx < 0) return { active: null, rest: text, hadMarker: false };
-
-  const variants = new Set([...lines[idx].matchAll(SESSION_MARKER)].map((m) => m[1].toUpperCase()));
-  if (variants.size === 0) return { active: null, rest: text, hadMarker: false };
-
-  const active = variants.size === 1 ? [...variants][0] === "START" : null;
-  const cleaned = lines[idx].replace(SESSION_MARKER, "").replace(/\s+$/, "");
-  const out = [...lines];
-  if (cleaned.trim()) out[idx] = cleaned;
-  else out.splice(idx, 1);
-  return { active, rest: out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd(), hadMarker: true };
-}
 
 export interface DecisionLineSplit {
   /** null when the reply has no marker on its last line, or names both variants. */
@@ -1038,6 +1086,166 @@ async function runRepositoryCommand(
   }
 }
 
+export type DeclaredCheck = { command: string; result: CheckResult };
+
+export interface CheckVerification {
+  command: string;
+  claimed: CheckResult;
+  actual: "passed" | "failed" | "skipped";
+  /** True only when the step claimed `passed` and the command did not pass. */
+  contradicted: boolean;
+}
+
+/**
+ * Run one command a step declared in `checks` (REQ-002).
+ *
+ * Separate from `runRepositoryCommand` on purpose: the preflight's git probes
+ * must stay fast, while a test suite legitimately takes seconds, so this runner
+ * takes its own timeout. The runner is injectable for the same reason
+ * `checkRepositoryState` takes one — otherwise the smoke test would spawn real
+ * suites every time a delivery gate runs.
+ */
+/**
+ * Classify a failed check run from the error it produced.
+ *
+ * Pure and exported so every branch is testable without spawning: the shapes
+ * that matter (a timeout, a missing command) cannot be produced on demand by a
+ * fake, which is exactly why they went unnoticed when the logic lived inline.
+ *
+ * Only unambiguous signals count. Running through a shell means a missing
+ * command does NOT surface as ENOENT — it surfaces as the shell's own exit code.
+ * POSIX shells use 127 and are unambiguous. Windows `cmd.exe` exits 1, which is
+ * indistinguishable from a check that genuinely failed with exit 1, and its
+ * diagnostic text is localised, so matching it would be neither portable nor
+ * safe. Erring the other way is deliberate: reporting `failed` stops the
+ * pipeline and a human looks, while reporting `skipped` on a real failure
+ * would let broken work through as verified.
+ */
+export function classifyCheckFailure(error: unknown): "failed" | "skipped" {
+  const failure = error as { code?: unknown; killed?: unknown } | null;
+  // A timeout is "we could not determine", not "it broke": the command was
+  // still running when the budget ran out. Node marks that with `killed`, and
+  // that flag is portable, unlike the message text.
+  if (failure?.killed === true) return "skipped";
+  if (failure?.code === "ENOENT" || failure?.code === "EACCES") return "skipped";
+  if (failure?.code === 127) return "skipped";
+  return "failed";
+}
+
+export async function runDeclaredCheck(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): Promise<"passed" | "failed" | "skipped"> {
+  try {
+    // A declared check is a shell line the agent wrote, so it runs through the
+    // shell exactly as the agent ran it — splitting it here would silently
+    // change what "the same command" means.
+    await execFileAsync(command, [], {
+      cwd,
+      timeout: timeoutMs,
+      windowsHide: true,
+      shell: true,
+    });
+    return "passed";
+  } catch (error) {
+    return classifyCheckFailure(error);
+  }
+}
+
+/**
+ * Every path the working tree has changed since `HEAD`, untracked files
+ * included (REQ-003).
+ *
+ * `git diff` alone is not the whole picture: it cannot see a file the
+ * implementation created, because an untracked file is not in the index and
+ * not in any commit. That produced both failure directions at once — a new
+ * planned file reported as never touched, and a new unplanned file never
+ * reported at all, which is the scope creep the comparison exists to catch.
+ * The runner is injectable for the same reason `checkRepositoryState` takes
+ * one: the smoke test must not need a repository.
+ */
+export async function collectChangedPaths(
+  cwd: string,
+  runner: (command: string, args: string[], cwd: string) => Promise<{ ok: boolean; stdout: string }> = runRepositoryCommand,
+): Promise<string[]> {
+  const lines = (stdout: string): string[] =>
+    stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  const tracked = await runner("git", ["diff", "--name-only", "HEAD"], cwd);
+  const untracked = await runner("git", ["ls-files", "--others", "--exclude-standard"], cwd);
+  const seen = new Set<string>();
+  for (const path of [...(tracked.ok ? lines(tracked.stdout) : []), ...(untracked.ok ? lines(untracked.stdout) : [])]) {
+    seen.add(path.replace(/\\/g, "/"));
+  }
+  return [...seen];
+}
+
+/**
+ * Re-run the checks the implementing step declared and report every claim the
+ * run contradicts. Only "claimed passed, did not pass" blocks delivery: the
+ * opposite case (claimed `failed`, passed anyway) is good news, and blocking on
+ * it would refuse to deliver working code.
+ */
+export async function verifyDeclaredChecks(
+  declared: DeclaredCheck[],
+  cwd: string,
+  timeoutMs: number,
+  run: (command: string, cwd: string, timeoutMs: number) => Promise<"passed" | "failed" | "skipped"> = runDeclaredCheck,
+): Promise<CheckVerification[]> {
+  const out: CheckVerification[] = [];
+  for (const check of declared) {
+    const command = typeof check.command === "string" ? check.command.trim() : "";
+    if (!command) continue;
+    const actual = await run(command, cwd, timeoutMs);
+    out.push({
+      command,
+      claimed: normalizeCheckResult(check.result),
+      actual,
+      contradicted: normalizeCheckResult(check.result) === "passed" && actual !== "passed",
+    });
+  }
+  return out;
+}
+
+/**
+ * Compare the paths the critic expected with the ones the diff touches (REQ-003).
+ * Both sides are reduced to a comparable form — a path, a path with `:line`, or a
+ * path inside a glob-ish mention — so a mismatch is a real observation and not
+ * a string-formatting accident. Pure, so the smoke test never needs a git repo.
+ */
+export function describePlanDiscrepancy(expected: string[], actual: string[]): string | null {
+  const normalize = (value: string): string =>
+    value
+      .trim()
+      .replace(/^[`"']+|[`"',:.]+$/g, "")
+      .replace(/:\d+(?:-\d+)?$/, "")
+      .replace(/^\.\//, "")
+      .replace(/\\/g, "/")
+      .toLowerCase();
+  // Compare on the normalized key but REPORT the string the step declared:
+  // a message naming `requirements.md` when the file is `REQUIREMENTS.md`
+  // sends a reviewer after a file that does not exist on a case-sensitive
+  // filesystem.
+  const index = (values: string[]): Map<string, string> => {
+    const out = new Map<string, string>();
+    for (const value of values) {
+      const key = normalize(value);
+      if (key && !out.has(key)) out.set(key, value.trim());
+    }
+    return out;
+  };
+  const expectedPaths = index(expected);
+  const actualPaths = index(actual);
+  if (expectedPaths.size === 0) return null;
+  const unexpected = [...actualPaths].filter(([key]) => !expectedPaths.has(key)).map(([, value]) => value).sort();
+  const untouched = [...expectedPaths].filter(([key]) => !actualPaths.has(key)).map(([, value]) => value).sort();
+  if (unexpected.length === 0 && untouched.length === 0) return null;
+  const lines: string[] = [];
+  if (unexpected.length > 0) lines.push(`Changed but not in the critic's plan: ${unexpected.join(", ")}.`);
+  if (untouched.length > 0) lines.push(`In the critic's plan but never touched: ${untouched.join(", ")}.`);
+  return lines.join(" ");
+}
+
 /**
  * Read local repository state without changing the worktree. Git is advisory:
  * repositories without Git simply skip the preflight. GitHub CLI is optional;
@@ -1193,6 +1401,14 @@ if (!steps || steps.length === 0) {
   // handoff a step is told to expect has to be reachable from its own prompt,
   // not only from the transcript the agent happens to see.
   let previousStepOutput: string | null = null;
+  // The report of the step that mutated the tree outlives that step, because
+  // `lastReport` is cleared before every step and REQ-002 needs the checks the
+  // implementer declared once delivery is about to run. The critic's expected
+  // paths are kept for the same reason (REQ-003).
+  let implementingChecks: { command: string; result: CheckResult }[] | null = null;
+  let implementingAgent: string | null = null;
+  let expectedPaths: string[] | null = null;
+  let planDiscrepancy: string | null = null;
 
   ctx.ui.notify(`Pipeline "${mode}": ${steps.length} steps — ${steps.join(" -> ")}`, "info");
 
@@ -1272,7 +1488,7 @@ if (!steps || steps.length === 0) {
       // Step 1 has no total yet: the orchestrator has not decided how many
       // steps this task really needs. Later steps show the real total.
       lastProgress = i === 0 ? agentName : `${i + 1}/${steps.length} ${agentName}`;
-      ctx.ui.setStatus(STATUS_KEY, formatStatus(mode, autoHarness, lastProgress, displayDecision));
+      ctx.ui.setStatus(STATUS_KEY, formatStatus(mode, autoHarness, lastProgress, displayDecision, inArchitectSession));
       ctx.ui.notify(`[${i + 1}/${steps.length}] ${agentName}${modelRef ? ` (${modelRef})` : ""}`, "info");
 
       // The template body never enters the transcript: this message only
@@ -1285,6 +1501,34 @@ if (!steps || steps.length === 0) {
         const blockers = pendingPreflightBlock;
         pendingPreflightBlock = [];
         if (!(await confirmPreflightBlock(ctx, blockers, agentName))) break;
+      }
+
+      // REQ-002: before a delivery step runs, the harness re-runs the checks the
+      // implementing step declared. The delivery agent has no shell of its own,
+      // so without this the last step of the pipeline trusts the implementer's
+      // own account of what passed. Only "claimed passed, did not pass" stops
+      // the run — the opposite case is good news, not a reason to refuse.
+      let verifiedChecks: CheckVerification[] = [];
+      if (agentName === DELIVERY_AGENT && implementingChecks && implementingChecks.length > 0) {
+        verifiedChecks = await verifyDeclaredChecks(implementingChecks, ctx.cwd, checkTimeoutMs(lines));
+        const contradicted = verifiedChecks.filter((c) => c.contradicted);
+        if (contradicted.length > 0) {
+          ctx.ui.notify(
+            `Pipeline stopped before "${agentName}": ${implementingAgent ?? "the implementing step"} reported checks that do not pass — ` +
+              contradicted.map((c) => `"${c.command}" (${c.actual})`).join(", ") +
+              `. Fix the failure or the report, and run the task again.`,
+            "error",
+          );
+          break;
+        }
+        const skipped = verifiedChecks.filter((c) => c.actual === "skipped");
+        if (skipped.length > 0) {
+          ctx.ui.notify(
+            `${skipped.length} declared check(s) could not be run here: ${skipped.map((c) => c.command).join(", ")}. ` +
+              "Report them as unverified rather than as verified.",
+            "warning",
+          );
+        }
       }
 
       // Declared project skills are injected, not just referenced: a step that
@@ -1304,6 +1548,18 @@ if (!steps || steps.length === 0) {
       // The preflight the harness computed belongs in the step prompt, not only
       // in a notification the mutating agent never sees.
       if (repositoryWarning) stepMessage.push(repositoryWarning);
+      // REQ-003: what the diff touched against what the critic expected is
+      // evidence for delivery to weigh, not a second verdict — so it is handed
+      // over, and delivery decides whether to proceed or stop and says which.
+      if (agentName === DELIVERY_AGENT && planDiscrepancy) {
+        stepMessage.push(`Diff against the critic's plan (objective, computed by the harness): ${planDiscrepancy}`);
+      }
+      if (agentName === DELIVERY_AGENT && verifiedChecks.length > 0) {
+        stepMessage.push(
+          `Checks the harness re-ran before you (${implementingAgent ?? "the implementing step"} declared them): ` +
+            verifiedChecks.map((c) => `${c.command} → ${c.actual}`).join("; "),
+        );
+      }
       if (skillBodies.length > 0) stepMessage.push("Project skill(s) for this step:", ...skillBodies);
       stepMessage.push(`Task: ${task}`);
       pi.sendUserMessage(stepMessage.join("\n"));
@@ -1321,15 +1577,12 @@ if (!steps || steps.length === 0) {
       completed.push(agentName);
       previousStepOutput = turn?.text ?? null;
 
-      // The architect owns the design session: it decides whether the user's
-      // next messages come back to it or go through the orchestrator again.
-      // Nothing else arms or closes it.
-      if (agentName === ARCHITECT_AGENT && lastSessionChoice !== null) {
-        inArchitectSession = lastSessionChoice;
+      // The architect opens the design session; only the user closes it, with
+      // `/harness-end`. There is no longer a `false` here to apply.
+      if (agentName === ARCHITECT_AGENT && lastSessionChoice === true) {
+        inArchitectSession = true;
         ctx.ui.notify(
-          inArchitectSession
-            ? `Architect session open: the next plain message goes straight to the ${ARCHITECT_AGENT}.`
-            : "Architect session closed: the next plain message is routed again.",
+          `Architect session open: the next plain message goes straight to the ${ARCHITECT_AGENT}. Use /harness-end to close it.`,
           "info",
         );
         lastSessionChoice = null;
@@ -1420,6 +1673,28 @@ if (!steps || steps.length === 0) {
         // A critic that blocks the plan stops the pipeline: the file-mutating
         // steps never run, and the critic's report stands as the final answer.
         if (lastReport?.verdict === "blocked") blockedByCritic = true;
+        // REQ-003: the critic's expected paths outlive its report, so the diff
+        // after the implementer can be compared against them.
+        if (Array.isArray(lastReport?.plannedPaths) && agentName === "critic") {
+          expectedPaths = lastReport?.plannedPaths ?? null;
+        }
+        // REQ-002: the checks a mutating step declared outlive its report too,
+        // so delivery can be gated on them.
+        if (agentMutatesFiles(lines, agentName) && Array.isArray(lastReport?.checks)) {
+          implementingChecks = lastReport?.checks ?? null;
+          implementingAgent = agentName;
+        }
+        // REQ-003: the moment there is something to compare, compute the
+        // discrepancy so it is waiting for the delivery step. Comparing names
+        // is objective, so this runs even when no git is available: an empty
+        // diff then reports every expected path as untouched, which is honest.
+        if (agentMutatesFiles(lines, agentName) && expectedPaths && expectedPaths.length > 0) {
+          const touched = await collectChangedPaths(ctx.cwd);
+          planDiscrepancy = describePlanDiscrepancy(expectedPaths, touched);
+          if (planDiscrepancy) {
+            ctx.ui.notify(`Diff does not match the critic's plan: ${planDiscrepancy}`, "info");
+          }
+        }
         // The report belongs to this step only: forget it before the next one.
         lastReport = null;
       }
@@ -1742,6 +2017,39 @@ export function dispatchUnsupportedAgent(agent: string, lines: string[]): string
 }
 
 /**
+ * REQ-004: independence, computed instead of judged. Two dispatched tasks may
+ * run concurrently only when their declared file sets are disjoint; anything
+ * else is refused with the shared paths, because "genuinely independent" was a
+ * judgement the model made about its own workload with no criterion.
+ *
+ * A task that declares no files is never treated as overlapping: it simply
+ * cannot be judged, and refusing it would punish the model for not using a
+ * field it was never required to send.
+ */
+export function dispatchOverlap(tasks: { agent: string; files?: unknown }[]): string | null {
+  const claimed: { agent: string; file: string }[] = [];
+  for (const task of tasks) {
+    if (!Array.isArray(task?.files)) continue;
+    for (const entry of task.files) {
+      if (typeof entry !== "string") continue;
+      const file = entry.trim();
+      if (file) claimed.push({ agent: String(task.agent ?? "?"), file });
+    }
+  }
+  for (let i = 0; i < claimed.length; i++) {
+    for (let j = i + 1; j < claimed.length; j++) {
+      if (claimed[i].agent === claimed[j].agent) continue;
+      if (claimed[i].file !== claimed[j].file) continue;
+      return (
+        `Tasks "${claimed[i].agent}" and "${claimed[j].agent}" both declare "${claimed[i].file}", so they are not independent and were not dispatched. ` +
+        `Dispatch them separately, or split the work so each task owns a disjoint set of paths.`
+      );
+    }
+  }
+  return null;
+}
+
+/**
  * Parameter schema for the dispatch tool. TypeBox resolves inside Pi (its
  * loader aliases `typebox`); outside Pi — e.g. the node smoke test — we fall
  * back to the equivalent plain JSON Schema, so the extension loads anywhere
@@ -1752,6 +2060,8 @@ async function buildDispatchParams(): Promise<Record<string, unknown>> {
   const briefDescription =
     "Curated brief: objective, relevant files with line refs, constraints, acceptance criteria, expected evidence, non-goals, unknowns";
   const tasksDescription = "Independent tasks to run in isolated background agents";
+  const filesDescription =
+    "Repository-relative paths this task will read or write. Two tasks may only run in parallel when their file sets are disjoint, so list every path the task touches; omit it and the check simply cannot judge this task";
   const parallelDescription = `Run tasks concurrently (default true; max ${DISPATCH_CONCURRENCY} at a time)`;
 
   let T: typeof import("typebox").Type | undefined;
@@ -1766,6 +2076,7 @@ async function buildDispatchParams(): Promise<Record<string, unknown>> {
         T.Object({
           agent: T.String({ description: agentDescription }),
           brief: T.String({ description: briefDescription }),
+          files: T.Optional(T.Array(T.String({ description: filesDescription }))),
         }),
         { minItems: 1, maxItems: DISPATCH_MAX_TASKS, description: tasksDescription },
       ),
@@ -1785,6 +2096,11 @@ async function buildDispatchParams(): Promise<Record<string, unknown>> {
           properties: {
             agent: { type: "string", description: agentDescription },
             brief: { type: "string", description: briefDescription },
+            files: {
+              type: "array",
+              items: { type: "string" },
+              description: filesDescription,
+            },
           },
           required: ["agent", "brief"],
           additionalProperties: false,
@@ -1809,6 +2125,8 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
   const decisionDescription = "ANSWER_ONLY when the task needs no file change, PIPELINE when it does";
   const reasonDescription = "One line of justification, shown in the status bar";
   const changedFilesDescription = "Repository-relative paths this step changed";
+  const plannedPathsDescription =
+    "Critic only: repository-relative paths the adjusted plan expects the implementation to touch. Pass [] when it expects none; the harness compares them against the diff";
   const commandDescription = "The check command as it was run";
   const resultDescription = "passed | failed | skipped";
   const notesDescription = 'What the delivery step must know; pass "" when there is nothing';
@@ -1817,7 +2135,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
   const lessonsDescription =
     "Findings worth reusing: root causes, gotchas, codebase discoveries, configuration changes. Save them with mem_save when Engram is available; the field carries them either way. Pass [] when there are none; an omitted field makes the report incomplete";
   const sessionActiveDescription =
-    'Architect only: START to keep the session open for the user\'s next messages, END to close it';
+    'Architect only: START to keep the design session open for the user\'s next messages. Only the user closes it, with /harness-end';
 
   let T: typeof import("typebox").Type | undefined;
   try {
@@ -1833,6 +2151,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
       }) as unknown as Record<string, unknown>,
       harness_report: T.Object({
         changed_files: T.Optional(T.Array(T.String({ description: changedFilesDescription }))),
+        planned_paths: T.Optional(T.Array(T.String({ description: plannedPathsDescription }))),
         checks: T.Optional(
           T.Array(
             T.Object({
@@ -1846,7 +2165,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
         verdict: T.Optional(T.String({ description: verdictDescription })),
       }) as unknown as Record<string, unknown>,
       harness_session: T.Object({
-        active: T.String({ description: sessionActiveDescription }),
+        active: T.String({ description: sessionActiveDescription, pattern: "^START$" }),
       }) as unknown as Record<string, unknown>,
     };
   }
@@ -1863,6 +2182,11 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
       type: "object",
       properties: {
         changed_files: { type: "array", items: { type: "string" }, description: changedFilesDescription },
+        planned_paths: {
+          type: "array",
+          items: { type: "string" },
+          description: plannedPathsDescription,
+        },
         checks: {
           type: "array",
           description: "Checks actually run, with their outcome",
@@ -1887,7 +2211,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
     harness_session: {
       type: "object",
       properties: {
-        active: { type: "string", description: sessionActiveDescription },
+        active: { type: "string", description: sessionActiveDescription, pattern: "^START$" },
       },
       required: ["active"],
     },
@@ -2102,6 +2426,31 @@ async function pickMode(ctx: ExtensionCommandContext, configPath: string): Promi
   ctx.ui.notify(`defaults.workflow_mode set to "${mode}"`, "info");
 }
 
+const REQUIREMENTS_FORMATS: RequirementsFormat[] = ["sections", "req-n"];
+
+/**
+ * Choose the shape the installer writes when it creates a missing requirements
+ * file. The harness reads no requirements file, so this is not a parser setting
+ * but a convention offered to the project: `sections` keeps the three headings
+ * the installer has always emitted, `req-n` adds one `### REQ-nnn` block per
+ * requirement.
+ */
+async function pickRequirementsFormat(ctx: ExtensionCommandContext, configPath: string): Promise<void> {
+  const lines = await readLines(configPath);
+  const current = getRequirementsFormat(lines);
+  const choice = await ctx.ui.select(
+    `Requirements file format (current: ${current})`,
+    REQUIREMENTS_FORMATS.map((f) => (f === current ? `${f} (current)` : f)),
+  );
+  if (!choice) return;
+  const format = choice.replace(" (current)", "") as RequirementsFormat;
+  await writeLines(configPath, setRequirementsFormat(lines, format));
+  ctx.ui.notify(
+    `defaults.requirements_format set to "${format}". It applies to the file init/update create when it is missing; an existing file is never rewritten.`,
+    "info",
+  );
+}
+
 async function pickAgentModelOnce(
   ctx: ExtensionCommandContext,
   configPath: string,
@@ -2280,6 +2629,7 @@ const CONFIG_MENU = [
   "5. Explain available modes",
   "6. Explain how to choose models with /models",
   "7. Toggle auto-harness (plain requests run the pipeline)",
+  "8. Change the requirements file format",
   "Cancel",
 ];
 
@@ -2306,26 +2656,22 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     };
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return {};
     let decision: HarnessDecision = null;
-    let sessionChoice: boolean | null = null;
     let changed = false;
     const content = message.content.map((part) => part);
-    // Only the last text part can carry the marker lines. A marker quoted
+    // Only the last text part can carry the marker line. A marker quoted
     // earlier belongs to the prose and is left visible: stripping it would
     // delete the sentence the model wrote and let the example decide.
     for (let p = content.length - 1; p >= 0; p--) {
       const part = content[p];
       if (part?.type !== "text" || !part.text) continue;
       const split = splitDecisionLine(part.text);
-      const session = splitSessionLine(split.rest);
-      if (!split.hadMarker && !session.hadMarker) continue;
-      if (split.hadMarker) decision = split.decision;
-      if (session.hadMarker) sessionChoice = session.active;
+      if (!split.hadMarker) continue;
+      decision = split.decision;
       changed = true;
-      content[p] = { ...part, text: session.rest };
+      content[p] = { ...part, text: split.rest };
       break;
     }
     if (!changed) return {};
-    if (sessionChoice !== null && lastSessionChoice === null) lastSessionChoice = sessionChoice;
     if (decision !== null) {
       // Only when still empty: a harness_decision call runs after this hook
       // (the runtime emits message_end, then executes tool calls) and must
@@ -2399,7 +2745,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         await writeLines(configPath, setAutoHarness(lines, next));
         await refreshModeStatus(ctx);
         ctx.ui.notify(explainAutoHarness(next), "info");
-      }
+      } else if (choice.startsWith("8.")) await pickRequirementsFormat(ctx, configPath);
     },
   });
 
@@ -2474,6 +2820,55 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("harness-validate", {
+    description: "Approve the architect's proposal: it writes the agreed content to the requirements file and keeps the design session open",
+    handler: async (args, ctx) => {
+      if (!requireUI(ctx)) return;
+      if (pipelineRunning) {
+        ctx.ui.notify("A harness pipeline is already running.", "warning");
+        return;
+      }
+      if (!inArchitectSession) {
+        ctx.ui.notify(
+          "There is no open design session, so there is nothing to approve. The architect only writes the requirements file after /harness-validate.",
+          "info",
+        );
+        return;
+      }
+      // Approving is not finishing: the next requirement may need the context
+      // of this conversation, so the session stays open and the user closes it
+      // with /harness-end. The architect is the step that does the writing.
+      const note = args.trim();
+      const task =
+        `The user approved the proposal you made${note ? `: ${note}` : ""}. ` +
+        "Write the agreed content into the requirements file now, then report what you wrote and, if it helps, " +
+        "ask whether to continue with another requirement or finish. Keep the session open: only /harness-end closes it.";
+      pipelineRunning = true;
+      try {
+        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), ANALYSIS_MODE, ARCHITECT_AGENT);
+      } catch (error) {
+        ctx.ui.notify(`Approval failed: ${String(error)}`, "error");
+      } finally {
+        pipelineRunning = false;
+      }
+    },
+  });
+
+  pi.registerCommand("harness-end", {
+    description: "Close the architect's design session: the next plain message is routed by the orchestrator again",
+    handler: async (_args, ctx) => {
+      if (!requireUI(ctx)) return;
+      if (!inArchitectSession) {
+        ctx.ui.notify("No design session is open.", "info");
+        return;
+      }
+      inArchitectSession = false;
+      lastSessionChoice = null;
+      await refreshModeStatus(ctx);
+      ctx.ui.notify("Design session closed: the next plain message is routed by the orchestrator again.", "info");
+    },
+  });
+
   pi.registerCommand("harness-delivery", {
     description: "Run the delivery agent without changing defaults.workflow_mode",
     handler: async (args, ctx) => {
@@ -2531,11 +2926,13 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     description: [
       "Dispatch independent background tasks to isolated harness agents (separate pi processes with their own context).",
       "Each task carries a curated brief — the only task context the subagent receives; its system prompt is the agent's prompt template, the harness contract, and the project's AGENTS.md when the project has one.",
+      "Tasks may run in parallel only when their declared `files` sets are disjoint; an overlap is refused with the shared paths.",
       `Up to ${DISPATCH_MAX_TASKS} tasks, ${DISPATCH_CONCURRENCY} run at a time.`,
     ].join(" "),
     promptSnippet: "Delegate independent, read-heavy work to isolated harness agents with a curated brief.",
     promptGuidelines: [
       "Use harness-dispatch only for independent work (exploration, reconnaissance, review) — never for steps that depend on each other.",
+      "Declare the files each task touches in `files`: two tasks may only run in parallel when their file sets are disjoint, and the harness refuses an overlap instead of taking your word for it.",
       "Never paste the conversation into a brief: include objective, relevant files with line refs, constraints, acceptance criteria, expected evidence, non-goals and unknowns.",
       "Compose your final answer from the returned results.",
     ],
@@ -2558,6 +2955,12 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       if (tasks.length === 0 || tasks.length > DISPATCH_MAX_TASKS) {
         return fail(`Provide between 1 and ${DISPATCH_MAX_TASKS} tasks.`);
       }
+
+      // REQ-004: independence is computed from the declared file sets, not
+      // judged. Refused here, before anything is spawned, so an overlap costs no
+      // process at all.
+      const overlap = dispatchOverlap(tasks);
+      if (overlap) return fail(overlap);
 
       const contract = resolveContractPath(lines, configPath, ctx.cwd);
       if (!contract.path) {
@@ -2800,6 +3203,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       promptGuidelines: [
         "Call harness_report exactly once, at the end of the turn, when finishing a harness pipeline step that owes a report.",
         "changed_files lists the paths you actually changed; checks lists the commands you actually ran, with their outcome.",
+        "Critic only: planned_paths lists the repository-relative paths your adjusted plan expects the implementation to touch. Pass [] when it expects none. The harness compares them against the diff and hands the result to delivery.",
         "Report every check you could not run as skipped. Do not claim a check you did not run.",
         "Every field is required: a report missing one of them is incomplete and costs a repair turn. Pass [] for a field that is genuinely empty, and lessons when there is anything worth remembering.",
       ],
@@ -2813,6 +3217,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         }
         const raw = params as {
           changed_files?: unknown;
+          planned_paths?: unknown;
           checks?: unknown;
           notes?: unknown;
           lessons?: unknown;
@@ -2834,6 +3239,9 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         const lessons = normalizeLessons(raw.lessons);
         lastReport = {
           changedFiles,
+          plannedPaths: Array.isArray(raw.planned_paths)
+            ? raw.planned_paths.filter((p): p is string => typeof p === "string")
+            : null,
           checks,
           lessons,
           notes: typeof raw.notes === "string" ? raw.notes : null,
@@ -2855,22 +3263,23 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       name: "harness_session",
       label: "Architect session",
       description: [
-        "Open or close the architect's multi-turn design session.",
-        "START keeps the user's next messages going straight to the architect; END sends them back through the orchestrator.",
-        "Call it once, at the end of the turn, instead of writing a HARNESS-SESSION line.",
+        "Open the architect's multi-turn design session.",
+        "START keeps the user's next messages going straight to the architect; the user closes it with /harness-end.",
+        "Call it once, at the end, the way harness_decision replaces the HARNESS-DECISION line.",
       ].join(" "),
-      promptSnippet: "Architect only: keep the design conversation open with harness_session(START), close it with harness_session(END).",
+      promptSnippet: "Architect only: open the design session with harness_session(START). The user closes it with /harness-end.",
       promptGuidelines: [
-        "Call harness_session exactly once, at the end of an architect turn, when the user should keep talking to you.",
+        "Call harness_session(START) exactly once, at the end of an architect turn, when the user wants to keep designing.",
         "The first turn of a design session is not sticky by itself: arm it only when the user wants to keep designing.",
+        "There is no way for you to close the session, and you should not ask the user to: approving a change is not finishing, so keep the session open after writing what was approved.",
         "Do not call it in ordinary conversation: it only has an effect inside an architect turn.",
       ],
       parameters: controlParams.harness_session as never,
       async execute(_toolCallId, params) {
         const raw = (params as { active?: unknown }).active;
         const active = typeof raw === "string" ? raw.trim().toUpperCase() : "";
-        if (active !== "START" && active !== "END") {
-          throw new Error('active must be "START" or "END".');
+        if (active !== "START") {
+          throw new Error('active must be "START". Only the user closes a session, with /harness-end.');
         }
         if (!pipelineActive) {
           return {
@@ -2879,15 +3288,13 @@ export default async function harnessExtension(pi: ExtensionAPI) {
           };
         }
         // Unconditional, like the other control tools: this runs after the
-        // message_end hook, so a guard here would let the text marker win.
-        lastSessionChoice = active === "START";
+        // message_end hook, so a guard here would let a textual fallback win.
+        lastSessionChoice = true;
         return {
           content: [
             {
               type: "text" as const,
-              text: active === "START"
-                ? "Session stays open: the next messages go straight to the architect."
-                : "Session closed: the next message goes through the orchestrator again.",
+              text: "Session open: the next messages go straight to the architect. /harness-end closes it.",
             },
           ],
           details: undefined,
