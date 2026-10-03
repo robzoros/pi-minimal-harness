@@ -458,6 +458,67 @@ test("init and update create the requirements file, and never overwrite one", as
   }
 });
 
+// REQ-006: the shape is the project's choice, read from
+// `defaults.requirements_format`. The harness never parses the file, so a
+// typo must fall back rather than break the install.
+test("requirements_format chooses the shape init writes, and an unknown value falls back", async () => {
+  const cases = [
+    { configured: "req-n", expectBlocks: true },
+    { configured: "reqnn", expectBlocks: false },
+  ];
+  for (const { configured, expectBlocks } of cases) {
+    const project = await tempProject();
+    try {
+      // `init` writes the config, so the key has to exist before the run that
+      // is supposed to read it. Deleting the file it wrote is what makes the
+      // next run create it again in the shape under test.
+      runInstaller(["init", "--project", project]);
+      const configPath = path.join(project, "harness.config.yaml");
+      const config = await fs.readFile(configPath, "utf8");
+      await fs.writeFile(configPath, config.replace(/^ {2}requirements_format: .*$/m, `  requirements_format: ${configured}`), "utf8");
+      await fs.rm(path.join(project, "REQUIREMENTS.md"), { force: true });
+
+      const result = runInstaller(["update", "--project", project]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, new RegExp(`create REQUIREMENTS\\.md \\(${configured === "req-n" ? "req-n" : "sections"}`));
+
+      const requirements = await fs.readFile(path.join(project, "REQUIREMENTS.md"), "utf8");
+      assert.match(requirements, /^# Requirements$/m);
+      assert.match(requirements, /^## Additions$/m);
+      assert.equal(/^### REQ-001/m.test(requirements), expectBlocks, configured);
+      if (expectBlocks) {
+        // The block carries the fields that make a requirement checkable.
+        assert.match(requirements, /\*\*Statement\*\*/);
+        assert.match(requirements, /\*\*Acceptance\*\*/);
+        assert.match(requirements, /\*\*Traces\*\*/);
+      }
+    } finally {
+      await fs.rm(project, { recursive: true, force: true });
+    }
+  }
+});
+
+// The installer previously ignored `defaults.requirements_file` and always
+// wrote a literal REQUIREMENTS.md, so a project that configured another name
+// got a file the architect would never look at.
+test("init honours defaults.requirements_file when creating the requirements file", async () => {
+  const project = await tempProject();
+  try {
+    runInstaller(["init", "--project", project]);
+    const configPath = path.join(project, "harness.config.yaml");
+    const config = await fs.readFile(configPath, "utf8");
+    await fs.writeFile(configPath, config.replace(/^ {2}requirements_file: .*$/m, "  requirements_file: docs/REQ.md"), "utf8");
+    await fs.rm(path.join(project, "REQUIREMENTS.md"), { force: true });
+
+    const result = runInstaller(["update", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /create docs[\\/]REQ\.md/);
+    assert.match(await fs.readFile(path.join(project, "docs", "REQ.md"), "utf8"), /^# Requirements$/m);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
 test("update migrates a retired defaults.workflow_mode to a mode that exists", async () => {
   const project = await tempProject();
   try {

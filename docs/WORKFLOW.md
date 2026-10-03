@@ -75,8 +75,9 @@ Responsibilities:
 
 - discuss the task with the user, one concrete question at a time;
 - size it with CodeGraph when available, falling back to `grep`/`rg`;
-- maintain `defaults.requirements_file` — the additions, the modifications and
-  what is explicitly out of scope — as the design moves;
+- maintain `defaults.requirements_file` — but **write it only when the user
+  approves**, with `/harness-validate`, in the shape `requirements_format`
+  chooses;
 - record what is worth reusing with `mem_save`;
 - open and close its own multi-turn session.
 

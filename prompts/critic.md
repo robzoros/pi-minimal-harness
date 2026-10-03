@@ -35,7 +35,11 @@ Numbered list; each with severity (blocker / major / minor) and a fix.
 Either a concrete simpler design, or "none — current approach is minimal".
 
 ### Adjusted plan
-The plan the implementer should follow (original plan with your changes applied).
+The plan the implementer should follow (original plan with your changes applied),
+with the repository-relative paths it expects the implementation to touch. Those
+paths are the contract with the harness: it compares them against the diff after
+the implementer runs and hands the difference to delivery, so name every file
+your plan really covers — including the tests you expect to change.
 
 ## Completion
 
@@ -45,12 +49,14 @@ read files to expand what you need.
 
 Write the report above. Inside a harness pipeline, also call
 **`harness_report`** exactly once with `changed_files` (empty — you do not edit
-files), `checks` (any checks you ran, with `passed` / `failed` / `skipped`),
-`notes` (what the implementer must know about the blockers you found),
-`verdict` (one of `PROCEED`, `PROCEED WITH CHANGES`, `BLOCKED` — a `BLOCKED`
-verdict stops the pipeline before the implementer runs) and `lessons` (what is
-worth reusing — a wrong assumption you disproved, a constraint the plan missed;
-`[]` when there is nothing). Every field the report contract names is
+files), `planned_paths` (the repository-relative paths your adjusted plan expects
+the implementation to touch; `[]` when it expects none), `checks` (any checks
+you ran, with `passed` / `failed` / `skipped`), `notes` (what the implementer
+must know about the blockers you found), `verdict` (one of `PROCEED`,
+`PROCEED WITH CHANGES`, `BLOCKED` — a `BLOCKED` verdict stops the pipeline
+before the implementer runs) and `lessons` (what is worth reusing — a wrong
+assumption you disproved, a constraint the plan missed; `[]` when there is
+nothing). Every field the report contract names is
 required: a report missing one of them is incomplete and the harness sends you
 a repair turn. A dispatched background subagent has no pipeline: deliver the
 report as your final message and do not rely on the tool.

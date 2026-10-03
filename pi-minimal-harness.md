@@ -51,8 +51,9 @@ mechanism, and the reference section above tells them to read this file.
   the harness reports the blocker instead of sending the step.
 - Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
   supported reasoning effort), `/harness-run <task>`, `/harness-delivery
-  [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
-  delivery agent without changing `defaults.workflow_mode`.
+  [instructions]`, `/harness-auto [on|off]`, `/harness-validate [note]` and
+  `/harness-end`. `/harness-delivery` runs the delivery agent without changing
+  `defaults.workflow_mode`.
 - The orchestrator routes the task with the `harness_decision` tool, once at
   the end of its turn: `ANSWER_ONLY` (a question, an idea, or anything needing
   conceptual design — the pipeline switches to the `analysis` workflow and the
@@ -64,12 +65,27 @@ mechanism, and the reference section above tells them to read this file.
   an `ANSWER_ONLY` ends the pipeline after the orchestrator instead. With
   `defaults.strict_decision_marker` on, a turn with no usable decision stops the
   pipeline instead of assuming `PIPELINE`.
+- The orchestrator is a **router**. It is granted no exploration tools, so it
+  cannot size the task or read the code: it classifies the task and hands it
+  over. The deep exploration belongs to the explorer (`full`, `full-dry-run`) or
+  the architect (`analysis`), both of whom start from the task with the
+  repository in front of them — a summary the router produced is work they
+  repeat and discard.
 - The architect converses with the user and keeps the formal requirements in
-  `defaults.requirements_file`. It opens and closes its own multi-turn session
-  with the `harness_session` tool (`START` / `END`; the fallback marker is
-  `HARNESS-SESSION: START` or `HARNESS-SESSION: END` as the last line). While
-  the session is open the user's next plain messages go straight to it, without
-  the orchestrator routing again. It owes no structured report: it converses.
+  `defaults.requirements_file`, in the shape `defaults.requirements_format`
+  chooses (`sections` or `req-n`; change it from `/harness-config`). It writes
+  that file **only when the user approves**, with `/harness-validate`: the
+  command starts a turn for the architect, it writes what was agreed and says
+  what it wrote. There is no path that puts something in that file the user did
+  not approve.
+- The architect opens its multi-turn session with the `harness_session` tool
+  (`START`); **only the user closes it**, with `/harness-end`. While the session
+  is open the user's next plain messages go straight to the architect, without
+  the orchestrator routing again. Approving a change is not finishing: the next
+  requirement may need the context of this conversation, so `/harness-validate`
+  leaves the session open. There is no model action that closes a session, so an
+  ordinary question still gets one architect turn and no trap. The architect owes
+  no structured report: it converses.
 - Every other agent writes the report its own prompt template asks
   for and calls `harness_report` with `changed_files`, `checks`, `notes` and
   `lessons` (the critic also passes its `verdict`: `PROCEED`,

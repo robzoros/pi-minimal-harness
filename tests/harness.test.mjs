@@ -946,6 +946,145 @@ check("dispatch: empty brief rejects", rEmpty.rejected && rEmpty.text.toLowerCas
 const rNoTasks = await rejected({ tasks: [] });
 check("dispatch: empty task list rejects", rNoTasks.rejected && rNoTasks.text.includes("between 1 and"), rNoTasks.text);
 
+// REQ-004: independence is computed from the declared file sets, so a declared
+// overlap must be refused before anything is spawned — and a task that declares
+// no files must not be punished for a field it was never required to send.
+check(
+  "dispatch: a declared file overlap is refused, naming the shared path",
+  mod.dispatchOverlap([
+    { agent: "explorer", files: ["src/a.ts", "src/shared.ts"] },
+    { agent: "critic", files: ["src/b.ts", "src/shared.ts"] },
+  ])?.includes("src/shared.ts"),
+  String(mod.dispatchOverlap([{ agent: "explorer", files: ["src/shared.ts"] }, { agent: "critic", files: ["src/shared.ts"] }])),
+);
+check(
+  "dispatch: disjoint file sets are allowed",
+  mod.dispatchOverlap([{ agent: "explorer", files: ["src/a.ts"] }, { agent: "critic", files: ["src/b.ts"] }]) === null,
+);
+check(
+  "dispatch: a task that declares no files is never treated as overlapping",
+  mod.dispatchOverlap([{ agent: "explorer" }, { agent: "critic", files: ["src/a.ts"] }]) === null &&
+    mod.dispatchOverlap([{ agent: "explorer" }, { agent: "critic" }]) === null,
+);
+const rOverlap = await rejected({
+  tasks: [
+    { agent: "explorer", brief: "a", files: ["src/shared.ts"] },
+    { agent: "critic", brief: "b", files: ["src/shared.ts"] },
+  ],
+});
+check("dispatch: the tool refuses the overlap before spawning", rOverlap.rejected && rOverlap.text.includes("src/shared.ts"), rOverlap.text);
+
+// REQ-002: only "claimed passed and did not pass" stops delivery.
+const runReturns = (actual) => async () => actual;
+check(
+  "check gate: a check claimed passed that does not pass is contradicted",
+  (await mod.verifyDeclaredChecks([{ command: "node t.mjs", result: "passed" }], tmp, 1000, runReturns("failed")))[0].contradicted === true,
+);
+check(
+  "check gate: a check claimed failed that passes is not contradicted — good news, not a block",
+  (await mod.verifyDeclaredChecks([{ command: "node t.mjs", result: "failed" }], tmp, 1000, runReturns("passed")))[0].contradicted === false,
+);
+check(
+  "check gate: a check claimed passed that could not be run is not contradicted either",
+  (await mod.verifyDeclaredChecks([{ command: "node t.mjs", result: "passed" }], tmp, 1000, runReturns("skipped")))[0].contradicted === true,
+  "skipped is not a pass: the implementer claimed it passed and it did not run",
+);
+
+// The shapes that matter here cannot be produced by a fake — that is why the
+// classification lived inline and stayed untested. Every branch, covered here.
+check("check failure: a timeout is skipped, not failed", mod.classifyCheckFailure({ killed: true, code: null }) === "skipped");
+check("check failure: a POSIX missing command (127) is skipped", mod.classifyCheckFailure({ code: 127 }) === "skipped");
+check("check failure: a bare ENOENT/EACCES is still skipped", mod.classifyCheckFailure({ code: "ENOENT" }) === "skipped" && mod.classifyCheckFailure({ code: "EACCES" }) === "skipped");
+check("check failure: a real non-zero exit is failed", mod.classifyCheckFailure({ code: 3 }) === "failed");
+check(
+  // The deliberate asymmetry: exit 1 through cmd.exe could be a missing command
+  // or a genuine failure, and guessing 'skipped' would let broken work through.
+  "check failure: exit 1 stays failed, because skipped on a real failure would ship it as verified",
+  mod.classifyCheckFailure({ code: 1 }) === "failed",
+);
+// One real spawn, so the execFile plumbing itself is proven and not only the
+// classifier: the rest are covered above without paying for a process each.
+const nodeExec = `"${process.execPath}"`;
+check(
+  "check run: a command that exits 0 is really run and really passes",
+  (await mod.runDeclaredCheck(`${nodeExec} -e "process.exit(0)"`, tmp, 30000)) === "passed",
+);
+check(
+  "check run: a command that exits 3 really fails",
+  (await mod.runDeclaredCheck(`${nodeExec} -e "process.exit(3)"`, tmp, 30000)) === "failed",
+);
+
+// REQ-003: the discrepancy is a pure function of two path lists, so it can be
+// tested without a git repository at all.
+check(
+  "plan diff: a path changed outside the plan is reported",
+  mod.describePlanDiscrepancy(["src/a.ts"], ["src/a.ts", "src/b.ts"])?.includes("src/b.ts"),
+);
+check(
+  "plan diff: a planned path never touched is reported",
+  mod.describePlanDiscrepancy(["src/a.ts", "src/b.ts"], ["src/a.ts"])?.includes("src/b.ts"),
+);
+check(
+  "plan diff: matching lists produce no discrepancy",
+  mod.describePlanDiscrepancy(["src/a.ts"], ["src/a.ts"]) === null,
+);
+check(
+  "plan diff: no expectation means nothing to compare",
+  mod.describePlanDiscrepancy([], ["src/a.ts"]) === null,
+);
+check(
+  "plan diff: line refs, quotes and case do not create a false mismatch",
+  mod.describePlanDiscrepancy(["`src/a.ts:12`"], ["SRC/A.TS"]) === null,
+  String(mod.describePlanDiscrepancy(["`src/a.ts:12`"], ["SRC/A.TS"])),
+);
+// Matching is normalised, but the message must name the string the step
+// actually declared: `requirements.md` does not exist on a case-sensitive
+// filesystem, and the reviewer would go looking for it.
+const casedMessage = mod.describePlanDiscrepancy(["REQUIREMENTS.md"], ["harness.config.yaml"]) ?? "";
+check(
+  "plan diff: the message names the declared path, not the normalised one",
+  casedMessage.includes("REQUIREMENTS.md") && !casedMessage.includes("requirements.md"),
+  casedMessage,
+);
+
+// REQ-003 was blind to untracked files, because `git diff` cannot see a file
+// the implementation created. Both failure directions at once: a new planned
+// file read as "never touched", and a new unplanned file never flagged at all.
+const fakeRunner = (trackedOut, untrackedOut) => async (command, args) => {
+  const isUntracked = args[0] === "ls-files";
+  return { ok: true, stdout: isUntracked ? untrackedOut : trackedOut };
+};
+check(
+  "changed paths: untracked files are included, not just tracked ones",
+  JSON.stringify(
+    await mod.collectChangedPaths(
+      tmp,
+      fakeRunner("harness.config.yaml\n", "REQUIREMENTS.md\n"),
+    ),
+  ) === JSON.stringify(["harness.config.yaml", "REQUIREMENTS.md"]),
+  JSON.stringify(
+    await mod.collectChangedPaths(tmp, fakeRunner("harness.config.yaml\n", "REQUIREMENTS.md\n")),
+  ),
+);
+check(
+  "changed paths: windows separators are normalised and duplicates collapse",
+  JSON.stringify(
+    await mod.collectChangedPaths(tmp, fakeRunner("src\\a.ts\nsrc\\a.ts\n", "")),
+  ) === JSON.stringify(["src/a.ts"]),
+  JSON.stringify(await mod.collectChangedPaths(tmp, fakeRunner("src\\a.ts\nsrc\\a.ts\n", ""))),
+);
+check(
+  "plan diff: a planned file that exists but is untracked is not a false positive",
+  mod.describePlanDiscrepancy(["REQUIREMENTS.md"], ["REQUIREMENTS.md"]) === null,
+  String(mod.describePlanDiscrepancy(["REQUIREMENTS.md"], ["REQUIREMENTS.md"])),
+);
+check(
+  "plan diff: a new unplanned file IS flagged — the scope creep the check exists for",
+  (mod.describePlanDiscrepancy(["harness.config.yaml"], ["harness.config.yaml", "src/new.ts"]) ?? "").includes(
+    "src/new.ts",
+  ),
+);
+
 // Anchored on the agent block: a plain first-match replace would land on
 // whichever agent declares `high` first, not the one being dispatched.
 const cfgUnsupported = cfgOriginal.replace(
@@ -1271,18 +1410,33 @@ check(
   `full=${simpleSteps.join("->")} tools=${implementerTools.join(",")}`,
 );
 check(
-  "config: the orchestrator, which runs in every mode, is granted codegraph too",
-  mod.getAgentTools(cfgLines, "orchestrator").includes("codegraph"),
+  "config: the orchestrator is granted nothing that would let it analyse the repository",
+  ["codegraph", "filesystem", "engram"].every((t) => !mod.getAgentTools(cfgLines, "orchestrator").includes(t)) &&
+    mod.getAgentTools(cfgLines, "orchestrator").includes("github"),
   mod.getAgentTools(cfgLines, "orchestrator").join(","),
 );
 check(
   "config: engram stays with the agents that record findings",
-  ["orchestrator", "explorer", "implementer"].every((a) => mod.getAgentTools(cfgLines, a).includes("engram")),
+  ["explorer", "implementer"].every((a) => mod.getAgentTools(cfgLines, a).includes("engram")),
 );
 check(
   "config: an agent without a tools list still resolves to no tools (backward compatibility)",
   JSON.stringify(mod.getAgentTools(["agents:", "  x:", "    model: p/m"], "x")) === "[]" &&
     JSON.stringify(mod.getAgentTools(cfgLines, "no-such-agent")) === "[]",
+);
+check(
+  "config: requirements_format defaults to sections and reads req-n",
+  mod.getRequirementsFormat(["defaults:", "  workflow_mode: full"]) === "sections" &&
+    mod.getRequirementsFormat(["defaults:", "  requirements_format: req-n"]) === "req-n" &&
+    // A typo must never break an install.
+    mod.getRequirementsFormat(["defaults:", "  requirements_format: reqnn"]) === "sections",
+);
+check(
+  "config: setRequirementsFormat rewrites the key and adds it when missing",
+  mod.getRequirementsFormat(mod.setRequirementsFormat(cfgLines, "sections")) === "sections" &&
+    mod.getRequirementsFormat(
+      mod.setRequirementsFormat(["defaults:", "  workflow_mode: full"], "req-n"),
+    ) === "req-n",
 );
 check(
   "config: the delivery agent declares the github-delivery skill",
@@ -1308,10 +1462,10 @@ check(
 // The example config is what `init` copies into an adopting project.
 const exampleLines = (await fs.readFile(path.join(ROOT, "harness.config.example.yaml"), "utf8")).split("\n");
 check(
-  "config: the shipped example grants codegraph to the implementer of the default mode too",
+  "config: the shipped example grants codegraph to the implementer of the default mode, and to nobody else",
   (mod.getWorkflowSteps(exampleLines, "full") ?? []).includes("implementer") &&
     mod.getAgentTools(exampleLines, "implementer").includes("codegraph") &&
-    mod.getAgentTools(exampleLines, "orchestrator").includes("codegraph"),
+    !mod.getAgentTools(exampleLines, "orchestrator").includes("codegraph"),
   mod.getAgentTools(exampleLines, "implementer").join(","),
 );
 
@@ -1330,9 +1484,13 @@ check("prompt: the implementer is told to record findings with mem_save", implem
 check("prompt: the local-change escape hatch is stated", /local,\s+obviously unreferenced/i.test(implementerPrompt));
 check("prompt: the report format carries a lessons field", implementerPrompt.includes("### Lessons"));
 check(
-  "prompt: the orchestrator and explorer record findings with mem_save too",
-  (await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8")).includes("mem_save") &&
-    (await fs.readFile(path.join(ROOT, "prompts", "explorer.md"), "utf8")).includes("mem_save"),
+  "prompt: only the explorer and implementer record findings with mem_save, not the router",
+  (await fs.readFile(path.join(ROOT, "prompts", "explorer.md"), "utf8")).includes("mem_save") &&
+    !(await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8")).includes("mem_save"),
+);
+check(
+  "prompt: the router is told not to explore, and not to size the task",
+  /do not explore/i.test(await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8")),
 );
 const reportTemplates = {};
 for (const f of ["critic.md", "delivery.md", "explorer.md", "implementer.md"]) {
@@ -1621,16 +1779,40 @@ sent.length = 0;
 const slash = await events["input"]({ text: "/harness-mode", source: "interactive" }, makeCtx(tmp, false));
 check("session: a slash command is not swallowed by the session", slash.action === "continue" && sent.length === 0);
 
-reset();
-const closeSession = waitTurnInjecting([{ after: 0, call: { name: "harness_session", params: { active: "END" } } }]);
-await mod.runPipeline(fakePi, makeCtx(tmp, true), "cerramos el diseño", closeSession, "analysis", "architect");
-check("session: the architect closes it", notifies.some((n) => n.includes("Architect session closed")), notifies.join(" | "));
+// REQ-007: the architect opens the session, only the user closes it. There is
+// no END any more, so the architect's attempt to close it must fail loudly
+// rather than silently doing nothing.
+let architectCloseError = "";
+try {
+  await tools["harness_session"].execute("call-close", { active: "END" }, {});
+} catch (error) {
+  architectCloseError = error instanceof Error ? error.message : String(error);
+}
+check("session: the architect cannot close the session", /only the user closes/i.test(architectCloseError), architectCloseError);
 
 reset();
 sent.length = 0;
 await events["input"]({ text: "otra pregunta", source: "interactive" }, makeCtx(tmp, false));
 await new Promise((r) => setTimeout(r, 1500));
-check("session: after END the orchestrator routes again", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
+check("session: a rejected END leaves the session open", sent[0]?.includes("prompts/architecture.md"), String(sent[0]).slice(0, 70));
+
+// /harness-end is the user's gesture, and it is the only one.
+await commands["harness-end"].handler("", makeCtx(tmp, true));
+check("session: /harness-end reports that it closed the session", notifies.some((n) => n.includes("Design session closed")), notifies.join(" | "));
+
+reset();
+sent.length = 0;
+await events["input"]({ text: "otra pregunta", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 1500));
+check("session: after /harness-end the orchestrator routes again", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
+
+notifies.length = 0;
+await commands["harness-end"].handler("", makeCtx(tmp, true));
+check(
+  "session: /harness-end is harmless when no session is open",
+  notifies.some((n) => n.includes("No design session is open")),
+  notifies.join(" | "),
+);
 
 // The architect converses, so it owes no structured report.
 reset();
@@ -1643,41 +1825,44 @@ check(
   `sent=${sent.length}`,
 );
 
-// The marker fallback, for prompts that have not migrated to the tool.
+// The textual marker is gone: there is nothing to fall back to, and a stale
+// `HARNESS-SESSION: START` in a reply must neither arm a session nor be eaten.
 reset();
 assistantScript.push("Needs design.\n\nHARNESS-DECISION: ANSWER_ONLY");
 assistantScript.push("Opening the session.\n\nHARNESS-SESSION: START");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "volvamos a esto", waitTurn);
-check("session: the textual fallback arms the session too", notifies.some((n) => n.includes("Architect session open")), notifies.join(" | "));
+check(
+  "session: a stale HARNESS-SESSION marker no longer arms anything",
+  !notifies.some((n) => n.includes("Architect session open")),
+  notifies.join(" | "),
+);
 const lastWithSession = JSON.stringify([...branchArr].reverse().find((e) => e.type === "message" && e.message.role === "assistant"));
-check("session: the marker is stripped from the visible reply", !lastWithSession.includes("HARNESS-SESSION"));
+check("session: and it is left in the visible reply rather than silently stripped", lastWithSession.includes("HARNESS-SESSION"));
 
 reset();
 sent.length = 0;
 await events["input"]({ text: "seguimos", source: "interactive" }, makeCtx(tmp, false));
 await new Promise((r) => setTimeout(r, 1500));
-check("session: the fallback really routed to the architect", sent[0]?.includes("prompts/architecture.md"), String(sent[0]).slice(0, 70));
+check("session: the orchestrator routes again after the stale marker", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
 
 // Leave no session armed for anything that runs after this block.
-reset();
-const closeAgain = waitTurnInjecting([{ after: 0, call: { name: "harness_session", params: { active: "END" } } }]);
-await mod.runPipeline(fakePi, makeCtx(tmp, true), "fin", closeAgain, "analysis", "architect");
+await commands["harness-end"].handler("", makeCtx(tmp, true));
 reset();
 sent.length = 0;
 await events["input"]({ text: "comprobación", source: "interactive" }, makeCtx(tmp, false));
 await new Promise((r) => setTimeout(r, 1500));
 check("session: no session is left armed", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
 
-// The session tool rejects anything that is not START or END. It throws on
-// purpose: the runtime marks a thrown tool as an error, while an `isError`
-// field on a returned result is ignored.
+// The session tool accepts START and nothing else. It throws on purpose: the
+// runtime marks a thrown tool as an error, while an `isError` field on a
+// returned result is ignored.
 let sessionToolError = "";
 try {
   await tools["harness_session"].execute("call-x", { active: "MAYBE" }, {});
 } catch (error) {
   sessionToolError = error instanceof Error ? error.message : String(error);
 }
-check("session: the tool rejects an unknown value", /START.*END/.test(sessionToolError), sessionToolError);
+check("session: the tool rejects an unknown value", /START/.test(sessionToolError), sessionToolError);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

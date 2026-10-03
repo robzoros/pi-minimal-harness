@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/harness-validate` and `/harness-end`.** The architect writes the
+  requirements file **only when the user approves**: `/harness-validate` runs a
+  one-step architect turn that writes what was agreed and reports what it wrote,
+  and `/harness-end` closes the design session. Approving is deliberately not
+  finishing — the session stays open after an approval, because the next
+  requirement may need the context of the conversation that produced it. No
+  model action closes a session any more: `harness_session` lost `END` and the
+  `HARNESS-SESSION:` marker is gone, so the user owns both ends. The footer
+  shows `design open — /harness-end to finish` while a session is armed.
+- **`defaults.requirements_format: sections | req-n`.** `init`/`update` write the
+  shape the project chose: `sections` is the three empty headings the installer
+  always emitted, `req-n` is one `### REQ-nnn` block per requirement with
+  `Acceptance` and `Traces`. Change it from `/harness-config`. The harness never
+  parses the file — this is a convention the project picks, not a setting with
+  consequences — and an unknown value falls back to `sections` rather than
+  breaking an install. `init` also honours `defaults.requirements_file` when the
+  name carries a directory, instead of always writing a literal
+  `REQUIREMENTS.md`.
+- **Delivery is gated on the checks it did not run.** Before a delivery step
+  starts, the harness re-runs the commands the implementing step declared in
+  `checks` and hands delivery the result. A check claimed `passed` that does not
+  pass stops the pipeline, naming the command; the opposite case (claimed
+  `failed`, passed anyway) is reported and does not block. `defaults.check_timeout_ms`
+  (300000) is the budget, deliberately separate from the preflight's short git
+  probes. The runner is injectable, so the smoke test never spawns real suites.
+- **`planned_paths` in `harness_report`, and a diff the harness compares.**
+  The critic reports the repository-relative paths its adjusted plan expects the
+  implementation to touch; after the implementer runs, the harness compares them
+  with `git diff --name-only` and hands the difference to delivery as evidence.
+  Delivery weighs it and says whether it proceeds — it is not a second verdict.
+- **Independence is computed for `harness-dispatch`, not judged.** Each task
+  declares the files it touches in `files`; tasks run concurrently only when
+  their file sets are disjoint, and an overlap is refused naming the shared path.
+  A task that declares no files is never refused, only unchecked.
+
 - **An `architect` agent, and the `analysis` workflow that runs it.** The
   conceptual phase is now an agent of its own: it talks to the user in chat,
   sizes the work against the repository with CodeGraph, records what is worth
@@ -374,6 +409,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured workflow mode.
 - Add an advisory repository preflight before pipelines to warn about
   uncommitted changes, branch divergence, and open pull requests.
+
+### Changed
+
+- **The orchestrator is a router and nothing else.** It is granted no
+  exploration tools (`codegraph`, `filesystem`, `engram` are removed; `github`
+  stays, because naming the issue a pull request closes is routing work). It
+  classifies the task and hands it over verbatim: no sizing, no file list, no
+  pre-analysis. The explorer — or the architect, in `analysis` — does that work
+  from the task with the repository in front of it, so a summary the router
+  produced is a turn they repeat and discard.
+- **The architect opens its design session; the user closes it.** See
+  `/harness-end` above: `harness_session` accepts `START` only.
+
+### Removed
+
+- **`HARNESS-SESSION:` as a fallback.** The session is opened with a tool call
+  and closed only by the user, so there is no textual fallback for either end.
+  A stale `HARNESS-SESSION:` line in a reply is now inert and stays visible in
+  the text rather than being silently stripped.
 
 ## [0.1.0] - 2026-09-24
 

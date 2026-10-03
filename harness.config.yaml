@@ -11,8 +11,17 @@ defaults:
   analysis_routing: true
   # Where the architect keeps the formal requirements of the work in design.
   requirements_file: REQUIREMENTS.md
+  # The shape init/update write when they create that file: `sections` is the
+  # three empty headings, `req-n` is one `### REQ-nnn` block per requirement.
+  # The harness never parses it — it is a convention the project picks, not a
+  # setting with consequences. Change it with /harness-config.
+  requirements_format: req-n
   strict_decision_marker: true
   preflight_policy: advisory
+  # How long a check declared in a step report may run before the harness gives
+  # up on it (REQ-002). Separate from the preflight's short git probes: a test
+  # suite legitimately takes seconds.
+  check_timeout_ms: 300000
 
 commands:
   preferred_interface: slash
@@ -59,18 +68,16 @@ agents:
     reasoning: high
     mutates_files: false
     tools:
-      - filesystem
-      - engram
-      - codegraph
-      # The orchestrator identifies (or creates) the issue the delivery step
-      # must close, so it needs the GitHub tool as well.
+      # The orchestrator only routes, so it is granted nothing that would let
+      # it analyse the repository: a router that can size the task produces a
+      # turn the next agent repeats. `github` is the exception — the handoff
+      # names the issue a pull request closes, and creating it is routing work.
       - github
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task
       - select_workflow_mode
       - prepare_next_agent_prompt
-      - record_findings_with_engram
 
   explorer:
     model: opencode-go/deepseek-v4.1-flash

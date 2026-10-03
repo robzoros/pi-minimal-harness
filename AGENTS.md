@@ -47,9 +47,13 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
 - `defaults.auto_harness` sends plain (non-slash) requests through the pipeline.
 - The **architect** converses with the user and maintains the formal
   requirements in `defaults.requirements_file` (created by `init`/`update` when
-  missing). It opens and closes its own multi-turn session with
-  `harness_session(START | END)` — the router never arms it, so an ordinary
-  question gets one architect turn instead of trapping the user in a session.
+  missing, in the shape `defaults.requirements_format` chooses). It writes that
+  file **only when the user approves**, with `/harness-validate`. It opens its
+  multi-turn session with `harness_session(START)`; only the user closes it,
+  with `/harness-end` — no model action closes a session, so an ordinary
+  question gets one architect turn instead of trapping the user in one.
+  Approving is not finishing: `/harness-validate` leaves the session open,
+  because the next requirement may need the context of this conversation.
   While the session is open, the user's next plain messages go straight to the
   architect and skip the orchestrator. Slash commands are never intercepted.
 - The driver checks every step's report: a complete `harness_report` call
@@ -80,8 +84,8 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   (`reportGaps`), so `[]` is the way to say "nothing" and an omitted field is
   what earns a repair turn.
 - Exploration and memory are reachable in every mode, not only in `full`:
-  `codegraph` is granted to the `architect`, `orchestrator`, `explorer` and
-  `implementer`, and `engram` to the same four, and the prompt templates name
+  `codegraph` is granted to the `architect`, `explorer` and `implementer`, and
+  `engram` to the same three, and the prompt templates name
   both. A grant is declarative, so a runtime without the tool degrades to the
   `grep`/`rg` fallback the templates describe instead of failing.
 - The repository preflight reads `defaults.preflight_policy`: `advisory` only

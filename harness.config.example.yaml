@@ -12,6 +12,15 @@ defaults:
   # Project-owned: `init`/`update` create it when missing and never overwrite
   # it. `.agents/REQUIREMENTS.md` is the documented alternative.
   requirements_file: REQUIREMENTS.md
+  # The shape `init`/`update` write when they create that file: `sections` is
+  # the three empty headings, `req-n` is one `### REQ-nnn` block per
+  # requirement. The harness never parses it — it is a convention the project
+  # picks, not a setting with consequences. Change it with /harness-config.
+  requirements_format: sections
+  # How long a check declared in a step report may run before the harness gives
+  # up on it. Separate from the preflight's short git probes: a test suite
+  # legitimately takes seconds. 300000 (5 min) is a safe default.
+  check_timeout_ms: 300000
   # A missing or ambiguous decision marker stops the pipeline instead of being
   # read as "not ANSWER_ONLY", which would run the mutating steps of a task
   # that may only need an answer. Set to false to keep guessing.
@@ -65,20 +74,17 @@ agents:
     reasoning: medium
     mutates_files: false
     tools:
-      - filesystem
-      - engram
-      # The orchestrator runs in every mode, so structural exploration belongs
-      # here too; remove the line when CodeGraph is not installed.
-      - codegraph
-      # The orchestrator identifies (or creates) the issue the delivery step
-      # must close, so it needs the GitHub tool as well.
+      # The orchestrator only routes. It is granted nothing that would let it
+      # analyse the repository, because a router that can size the task spends a
+      # turn producing what the next agent does again from scratch. `github` is
+      # the exception: the handoff names the issue a pull request closes, and
+      # creating it is routing work.
       - github
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task
       - select_workflow_mode
       - prepare_next_agent_prompt
-      - record_findings_with_engram
   explorer:
     model: provider/model-id
     reasoning: high
