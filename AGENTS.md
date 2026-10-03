@@ -11,11 +11,11 @@ the Pi coding agent, published for use in other people's projects.
 | `README.md` | Public front door: inspiration, install, configuration, commands, skills. |
 | `pi-minimal-harness.md` | The generic harness contract, copied verbatim to the root of every adopting project and pointed at from their `AGENTS.md`. |
 | `harness.config.yaml` | Single source of truth: `defaults` (mode, auto-harness, short-circuit, dispatch gate, contract file), `commands`, `workflows` (mode → agent steps), `agents` (model, reasoning, tools, prompt template), `skills`. |
-| `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool. |
+| `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool, and the control tools (`harness_decision`, `harness_report`, `harness_session`). |
 | `prompts/` | Per-agent prompt templates referenced by `harness.config.yaml`. |
 | `.agents/skills/github-delivery/` | The shipped project skill (branch → commit → push → PR). |
 | `docs/WORKFLOW.md`, `docs/DISPATCH-PLAN.md` | Design documentation (roles/modes/config shape; background dispatch plan). |
-| `tests/harness.test.mjs` | Node smoke test: `node tests/harness.test.mjs`. |
+| `tests/harness.test.mjs`, `tests/install.test.mjs` | Node smoke tests. |
 | `CHANGELOG.md`, `LICENSE` | Keep a Changelog + MIT. |
 
 There is **no** `package.json` and no `src/`: the adopting application's
@@ -25,20 +25,33 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
 ## How the harness works
 
 - A workflow mode selects an ordered list of agent steps (`workflows.<mode>`).
+  There are three: `full` (the technical flow through GitHub delivery),
+  `full-dry-run` (explore, critique and simulate implementation without
+  mutating files) and `analysis` (the interactive `orchestrator -> architect`).
 - For each step the extension switches to that agent's model and reasoning level,
   renders `prompts/<agent>.md` as a short pointer (template bodies never enter
   the transcript) and sends it as the next turn; the runtime sequences the
   steps, so the model cannot skip them.
-- The orchestrator declares its decision with the `harness_decision` tool, once
-  at the end of its turn: `ANSWER_ONLY` for questions and tasks that change no
-  files (the pipeline stops after the first step) or `PIPELINE` when files must
-  change. The textual marker `HARNESS-DECISION:` on the last line remains a
-  fallback; the tool wins when both are present. The marker counts only on the
-  last non-empty line, and both variants on that line are ambiguous.
+- The orchestrator is a **router**, not a worker. It declares its route with the
+  `harness_decision` tool, once at the end of its turn: `ANSWER_ONLY` when the
+  task is a question, an idea or anything needing conceptual design, which
+  **switches the pipeline to the `analysis` workflow** and hands the turn to the
+  architect; `PIPELINE` when it is a closed requirements contract, which runs
+  the configured mode. `defaults.analysis_routing: false` restores the older
+  behaviour in which `ANSWER_ONLY` ended the pipeline after the orchestrator.
+  The textual marker `HARNESS-DECISION:` on the last line remains a fallback;
+  the tool wins when both are present. The marker counts only on the last
+  non-empty line, and both variants on that line are ambiguous.
   `defaults.strict_decision_marker` makes a turn with no usable decision stop
   the pipeline instead of reading its absence as `PIPELINE`.
-- `defaults.auto_harness` sends plain (non-slash) requests through the pipeline;
-  `defaults.question_short_circuit` enables the orchestrator's early exit.
+- `defaults.auto_harness` sends plain (non-slash) requests through the pipeline.
+- The **architect** converses with the user and maintains the formal
+  requirements in `defaults.requirements_file` (created by `init`/`update` when
+  missing). It opens and closes its own multi-turn session with
+  `harness_session(START | END)` — the router never arms it, so an ordinary
+  question gets one architect turn instead of trapping the user in a session.
+  While the session is open, the user's next plain messages go straight to the
+  architect and skip the orchestrator. Slash commands are never intercepted.
 - The driver checks every step's report: a complete `harness_report` call
   (`changed_files`, `checks`, `notes`, `lessons` all present, `[]` for a
   genuinely empty one) satisfies it, and the textual marker `HARNESS-DONE` is
@@ -57,20 +70,20 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   `defaults.subagent_context_file` when it resolves, `pi-minimal-harness.md`,
   an `AGENTS.md` carrying the harness block, then a legacy `AGENTS-addition.md`
   (see `docs/DISPATCH-PLAN.md`).
-- The control tools `harness_decision` and `harness_report` record the pipeline's
-  control flow. Their state is captured in their own `execute`, which runs after
-  the `message_end` hook — so the tool must assign unconditionally and the hook
-  only when empty, or the textual fallback would win. They are inert outside a
-  pipeline.
+- The control tools `harness_decision`, `harness_report` and `harness_session`
+  record the pipeline's control flow. Their state is captured in their own
+  `execute`, which runs after the `message_end` hook — so the tool must assign
+  unconditionally and the hook only when empty, or the textual fallback would
+  win. They are inert outside a pipeline.
 - The `harness_report` tool carries a `lessons` field: the findings the step
   also saves with `mem_save`. The driver validates presence, not content
   (`reportGaps`), so `[]` is the way to say "nothing" and an omitted field is
   what earns a repair turn.
 - Exploration and memory are reachable in every mode, not only in `full`:
-  `codegraph` is granted to the `orchestrator`, `explorer` and `implementer`,
-  and `engram` to the same three, and the prompt templates name both. A grant
-  is declarative, so a runtime without the tool degrades to the `grep`/`rg`
-  fallback the templates describe instead of failing.
+  `codegraph` is granted to the `architect`, `orchestrator`, `explorer` and
+  `implementer`, and `engram` to the same four, and the prompt templates name
+  both. A grant is declarative, so a runtime without the tool degrades to the
+  `grep`/`rg` fallback the templates describe instead of failing.
 - The repository preflight reads `defaults.preflight_policy`: `advisory` only
   reports, `blocking` stops the first agent marked `mutates_files: true` when
   the tree is dirty or a pull request is open — asked once with a TUI, blocked

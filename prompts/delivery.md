@@ -18,8 +18,9 @@ Deliver completed work through GitHub, following the project skill
    and focused checks were run. The implementer inspected its own diff; you
    confirm only that the files it reported are the files staged, and review
    nothing else. The source of truth for the checks is the implementer's report
-   in this conversation. In `delivery-only` there is no implementer report, so
-   use the verification evidence the orchestrator quoted in its handoff. You
+   in this conversation. With no implementer report — a run that starts straight
+   at delivery — say so, and use the verification evidence the orchestrator
+   quoted in its handoff. You
    have no shell and no test runner, so you do **not** re-run them and you never
    invent one. If neither source reported checks, say so and treat the delivery
    as unverified.

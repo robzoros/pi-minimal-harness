@@ -39,31 +39,57 @@ Pull request
 
 ### 1. Orchestrator
 
-The orchestrator receives the user's request and turns it into a task prompt for
-the next agent.
+The orchestrator is the **router**: it receives the user's request and decides
+which workflow runs. It does no work of its own.
 
 Responsibilities:
 
-- classify the task;
-- choose the workflow mode;
-- decide whether Engram should be queried (OpenSpec is the explorer's and the
-  critic's tool, not the orchestrator's);
+- route the task: a question, an idea or anything needing conceptual design goes
+  to `analysis` (`orchestrator -> architect`); a closed requirements contract
+  goes to `full` or `full-dry-run`;
 - size the task with structural code exploration when it helps, without taking
   over the explorer's deep dive;
+- prepare the handoff for the next step;
+- decide whether Engram should be queried (OpenSpec is the explorer's and the
+  critic's tool, not the orchestrator's);
 - identify (or create) the single issue the work closes, when the repository
   requires issue-linked pull requests;
 - preserve the user's intent without over-expanding the task.
 
 Expected output:
 
-- selected workflow mode;
+- the route taken;
 - task summary;
 - constraints;
 - handoff for the next step (files/areas, acceptance criteria, issue number,
   verification evidence already available);
 - open questions.
 
-### 2. Explorer Agent
+### 2. Architect Agent
+
+The architect owns the conceptual phase. It talks to the user in chat, sizes the
+work against the repository, and writes the formal requirements the technical
+phase is then built from.
+
+Responsibilities:
+
+- discuss the task with the user, one concrete question at a time;
+- size it with CodeGraph when available, falling back to `grep`/`rg`;
+- maintain `defaults.requirements_file` — the additions, the modifications and
+  what is explicitly out of scope — as the design moves;
+- record what is worth reusing with `mem_save`;
+- open and close its own multi-turn session.
+
+It owes **no** structured report: it converses, and a report owed on every chat
+turn is the opposite of a chat.
+
+The session is the architect's to control: it calls `harness_session(START)`
+when the user wants to keep designing, and `harness_session(END)` when they are
+done. While it is open, the user's next plain messages go straight to the
+architect and skip the orchestrator. The router never arms it, so an ordinary
+question gets a single architect turn and cannot trap the user in a session.
+
+### 3. Explorer Agent
 
 The explorer investigates possible solutions before implementation.
 
@@ -86,7 +112,7 @@ Expected output:
 - recommended approach;
 - likely tests/checks.
 
-### 3. Critic Agent
+### 4. Critic Agent
 
 The critic reviews the explorer's output and looks for improvements.
 
@@ -107,7 +133,7 @@ Expected output:
 - a verdict: `PROCEED`, `PROCEED WITH CHANGES` or `BLOCKED`. The harness stops
   the pipeline on `BLOCKED` and the critic report becomes the final answer.
 
-### 4. Implementer Agent
+### 5. Implementer Agent
 
 The implementer performs the code change.
 
@@ -128,7 +154,7 @@ Expected output:
 - unresolved risks;
 - Engram memory candidates.
 
-### 5. GitHub Delivery Agent
+### 6. GitHub Delivery Agent
 
 The delivery agent turns verified local work into a pull request.
 
@@ -269,7 +295,7 @@ agents:
 
 The configuration should support overrides per task. For example, a risky
 database migration may use a stronger model for the critic and implementer,
-while a small copy change may use simple mode with a cheaper implementer model.
+while a small copy change may pick a cheaper implementer model.
 
 ## Pi Slash Command Interface
 
@@ -279,11 +305,9 @@ Desired commands:
 
 ```text
 /harness mode
-/harness mode simple
+/harness mode analysis
 /harness mode full-dry-run
 /harness mode full
-/harness mode implementation-only
-/harness mode delivery-only
 
 /harness models
 /harness model set orchestrator <model-id> [effort]
@@ -334,11 +358,11 @@ your-project/
         ├── harness.config.yaml
         ├── workflows/
         │   ├── full.yaml
-        │   ├── simple.yaml
-        │   ├── implementation-only.yaml
-        │   └── delivery-only.yaml
+        │   ├── full-dry-run.yaml
+        │   └── analysis.yaml
         └── prompts/
             ├── orchestrator.md
+            ├── architect.md
             ├── explorer.md
             ├── critic.md
             ├── implementer.md

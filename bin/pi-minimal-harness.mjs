@@ -509,6 +509,59 @@ async function findExistingInstall(project) {
   return null;
 }
 
+/**
+ * The architect keeps the formal requirements of the work in design, so an
+ * adopting project needs the file before the first design session. Only a
+ * missing file is created: it belongs to the project, like its changelog, and
+ * is never touched again — so it must stay out of the harness-owned set that
+ * `update` replaces.
+ */
+async function ensureRequirements(project, options, report) {
+  const destination = path.join(project, "REQUIREMENTS.md");
+  const relative = path.relative(project, destination) || destination;
+  if (await pathExists(destination)) {
+    report.push(`unchanged ${relative} (project requirements kept)`);
+    return;
+  }
+  report.push(`create ${relative} (empty: the architect fills it during design)`);
+  if (options.dryRun) return;
+  const heading = [
+    "# Requirements",
+    "",
+    "The formal scope of the work in design, maintained by the architect.",
+    "",
+    "## Additions",
+    "",
+    "## Modifications",
+    "",
+    "## Out of scope",
+    "",
+  ].join("\n");
+  await fs.writeFile(destination, heading, "utf8");
+}
+
+/**
+ * Modes this harness no longer offers. An installation that names one keeps
+ * its value: the merge is additive and never overwrites a local scalar, so
+ * without this the pipeline would resolve a mode with no steps and auto-harness
+ * would stop working with no error the user could act on.
+ */
+const RETIRED_MODES = ["simple", "implementation-only", "delivery-only"];
+const REPLACEMENT_MODE = "full";
+
+/** Rewrite `defaults.workflow_mode` when it names a retired mode. */
+async function migrateWorkflowMode(destination, options, report) {
+  if (!(await pathExists(destination))) return;
+  const text = await fs.readFile(destination, "utf8");
+  const match = /^ {2}workflow_mode:\s*(\S+)\s*$/m.exec(text);
+  if (!match || !RETIRED_MODES.includes(match[1])) return;
+  const relative = path.relative(options.project, destination) || destination;
+  report.push(`migrate ${relative}: workflow_mode "${match[1]}" is gone, using "${REPLACEMENT_MODE}"`);
+  if (options.dryRun) return;
+  const next = text.replace(/^ {2}workflow_mode:\s*\S+\s*$/m, `  workflow_mode: ${REPLACEMENT_MODE}`);
+  await fs.writeFile(destination, next, "utf8");
+}
+
 async function install(options) {
   const report = [];
   await fs.mkdir(options.project, {recursive: true });
@@ -549,7 +602,9 @@ async function install(options) {
     report,
   );
   await ensureHarnessReference(options.project, options, report);
+  await migrateWorkflowMode(path.join(options.project, "harness.config.yaml"), options, report);
   await ensureChangelog(options.project, options, report);
+  await ensureRequirements(options.project, options, report);
   await reportTemplatePlaceholders(path.join(options.project, "harness.config.yaml"), report);
   await addLocalConfigExclude(options.project, options, report);
 

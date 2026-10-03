@@ -32,15 +32,20 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+// Labels for the mode picker, the help text and validation. The steps of a
+// mode are read from `workflows.<mode>` in the configuration, so this list is
+// never the place a mode is defined.
 const MODES: Array<{ id: string; steps: string; when: string }> = [
-  { id: "simple", steps: "orchestrator -> implementer", when: "small and clear changes" },
-  { id: "full-dry-run", steps: "orchestrator -> explorer -> critic", when: "exploration and critique without editing files" },
   { id: "full", steps: "orchestrator -> explorer -> critic -> implementer -> delivery", when: "non-trivial tasks that should end in a pull request" },
-  { id: "implementation-only", steps: "orchestrator -> implementer", when: "exploration and critique already happened, or a complete plan is provided" },
-  { id: "delivery-only", steps: "orchestrator -> delivery", when: "changes already exist locally and only branch/commit/push/PR is needed" },
+  { id: "full-dry-run", steps: "orchestrator -> explorer -> critic", when: "exploration and critique without editing files" },
+  { id: "analysis", steps: "orchestrator -> architect", when: "a question, an idea or anything needing conceptual design" },
 ];
+/** The interactive workflow the orchestrator routes into. */
+const ANALYSIS_MODE = "analysis";
+/** The conceptual agent: it talks to the user and holds the requirements file. */
+const ARCHITECT_AGENT = "architect";
 const MODE_IDS = MODES.map((m) => m.id);
-const REQUIRED_AGENTS = ["orchestrator", "explorer", "critic", "implementer", "delivery"];
+const REQUIRED_AGENTS = ["architect", "orchestrator", "explorer", "critic", "implementer", "delivery"];
 const STATUS_KEY = "corpustory-harness-mode";
 const DISPATCH_WIDGET_KEY = "corpustory-harness-dispatch";
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -57,11 +62,33 @@ let lastDecision: HarnessDecision = null;
 /** Justification the orchestrator gave with the decision tool, if any. */
 let lastDecisionReason = "";
 
+/**
+ * The decision the footer keeps showing for the whole run. It is separate from
+ * `lastDecision`, which is cleared before every step so a step never reads the
+ * previous one's decision as its own.
+ */
+let displayDecision: HarnessDecision = null;
+
 /** Structured report of the step that just finished, when it used the tool. */
 let lastReport: HarnessReport | null = null;
 
 /** True while a pipeline is running: the harness tools are inert outside one. */
 let pipelineActive = false;
+
+/**
+ * True while the architect holds a multi-turn session: the user's next inputs
+ * go straight to it, without the orchestrator routing again. Only the architect
+ * arms and disarms it (harness_session) — the router never does, so an ordinary
+ * question gets one architect turn and no trap.
+ */
+let inArchitectSession = false;
+
+/**
+ * What the architect asked for this turn: true to keep the session open, false
+ * to close it, null when it said nothing. The tool assigns it unconditionally
+ * and the driver applies it once the turn ends.
+ */
+let lastSessionChoice: boolean | null = null;
 
 export type CheckResult = "passed" | "failed" | "skipped";
 
@@ -147,7 +174,7 @@ async function refreshModeStatus(ctx: ExtensionContext): Promise<void> {
       return;
     }
     const lines = await readLines(configPath);
-    ctx.ui.setStatus(STATUS_KEY, formatStatus(getWorkflowMode(lines), isAutoHarness(lines), lastProgress ?? undefined, lastDecision));
+    ctx.ui.setStatus(STATUS_KEY, formatStatus(getWorkflowMode(lines), isAutoHarness(lines), lastProgress ?? undefined, displayDecision));
   } catch {
     ctx.ui.setStatus(STATUS_KEY, undefined);
   }
@@ -166,6 +193,12 @@ async function computeDecisionProgress(
     if (!configPath) return null;
     const lines = await readLines(configPath);
     const mode = getWorkflowMode(lines);
+    // ANSWER_ONLY does not end the run when routing is on: the architect is the
+    // next step, so the progress must not claim the pipeline finished.
+    if (decision === "answer_only" && isAnalysisRouting(lines)) {
+      const routed = getWorkflowSteps(lines, ANALYSIS_MODE);
+      return `1/${routed && routed.length > 0 ? routed.length : 2} ${ARCHITECT_AGENT}`;
+    }
     const steps = mode ? getWorkflowSteps(lines, mode) : null;
     const first = steps && steps.length > 0 ? steps[0] : "orchestrator";
     return decision === "answer_only"
@@ -366,6 +399,18 @@ export function setWorkflowMode(lines: string[], mode: string): string[] {
   return lines;
 }
 
+/** Workflow modes declared in the configuration, in file order. */
+export function listWorkflows(lines: string[]): string[] {
+  const section = topLevelSection(lines, "workflows");
+  if (!section) return [];
+  const names: string[] = [];
+  for (let i = section.start + 1; i < section.end; i++) {
+    const match = lines[i].match(/^ {2}(\S+):\s*$/);
+    if (match) names.push(match[1]);
+  }
+  return names;
+}
+
 /** Ordered agent steps of a workflow mode, or null when the mode has no entry. */
 export function getWorkflowSteps(lines: string[], mode: string): string[] | null {
   const block = nestedBlock(lines, "workflows", mode);
@@ -439,9 +484,35 @@ export function isAutoHarness(lines: string[]): boolean {
   return getDefaultFlag(lines, "auto_harness", false);
 }
 
-/** When true, an orchestrator `ANSWER_ONLY` decision stops the pipeline early. */
+/**
+ * When true, an orchestrator `ANSWER_ONLY` decision stops the pipeline early.
+ * Superseded by `analysis_routing`, which routes the turn to the architect
+ * instead; still read when `analysis_routing` is absent so an adopter that set
+ * it keeps that behaviour through the upgrade.
+ */
 export function isQuestionShortCircuit(lines: string[]): boolean {
   return getDefaultFlag(lines, "question_short_circuit", true);
+}
+
+/**
+ * Whether the orchestrator's ANSWER_ONLY routes into the `analysis` workflow
+ * instead of ending the pipeline. `defaults.analysis_routing` decides it; when
+ * that key is absent the legacy `question_short_circuit` still does.
+ */
+export function isAnalysisRouting(lines: string[]): boolean {
+  const section = topLevelSection(lines, "defaults");
+  if (!section) return true;
+  const pattern = /^ {2}analysis_routing:\s*(\S+)\s*$/;
+  for (let i = section.start; i < section.end; i++) {
+    const match = lines[i].match(pattern);
+    if (match) return match[1] === "true";
+  }
+  return isQuestionShortCircuit(lines);
+}
+
+/** `defaults.requirements_file`: where the architect keeps the formal scope. */
+export function getRequirementsFile(lines: string[]): string {
+  return getDefaultString(lines, "requirements_file", "REQUIREMENTS.md");
 }
 
 /**
@@ -671,6 +742,42 @@ export function supportedReasoningLevels(model: PiModel): ReasoningLevelArg[] {
 type HarnessDecision = "answer_only" | "pipeline" | null;
 
 const DECISION_MARKER = /HARNESS-DECISION:\s*(ANSWER_ONLY|PIPELINE)/gi;
+
+/** Fallback for prompts that have not migrated to the `harness_session` tool. */
+const SESSION_MARKER = /HARNESS-SESSION:\s*(START|END)/gi;
+
+export interface SessionLineSplit {
+  /** true = start the session, false = end it, null = the line was ambiguous. */
+  active: boolean | null;
+  rest: string;
+  hadMarker: boolean;
+}
+
+/**
+ * The session marker on the last line with text, exactly like the decision
+ * marker: only there, so naming it in prose never arms or ends a session.
+ */
+export function splitSessionLine(text: string): SessionLineSplit {
+  const lines = text.split("\n");
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim()) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return { active: null, rest: text, hadMarker: false };
+
+  const variants = new Set([...lines[idx].matchAll(SESSION_MARKER)].map((m) => m[1].toUpperCase()));
+  if (variants.size === 0) return { active: null, rest: text, hadMarker: false };
+
+  const active = variants.size === 1 ? [...variants][0] === "START" : null;
+  const cleaned = lines[idx].replace(SESSION_MARKER, "").replace(/\s+$/, "");
+  const out = [...lines];
+  if (cleaned.trim()) out[idx] = cleaned;
+  else out.splice(idx, 1);
+  return { active, rest: out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd(), hadMarker: true };
+}
 
 export interface DecisionLineSplit {
   /** null when the reply has no marker on its last line, or names both variants. */
@@ -1049,11 +1156,13 @@ export async function runPipeline(
     ctx.ui.notify("defaults.workflow_mode is not set in the harness configuration.", "error");
     return;
   }
-  const steps = agentOverride ? [agentOverride] : getWorkflowSteps(lines, mode);
-  if (!steps || steps.length === 0) {
-    ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
-    return;
-  }
+  // Not const: routing replaces the remaining steps with the analysis workflow,
+// so a task that started in `full` can land on `architect` and nothing else.
+let steps = agentOverride ? [agentOverride] : getWorkflowSteps(lines, mode);
+if (!steps || steps.length === 0) {
+  ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
+  return;
+}
   const repositoryState = await checkRepositoryState(ctx.cwd);
   const repositoryWarning = formatRepositoryPreflight(repositoryState);
   if (repositoryWarning) ctx.ui.notify(repositoryWarning, "warning");
@@ -1061,6 +1170,7 @@ export async function runPipeline(
   const originalModel = ctx.model;
   const originalThinking = pi.getThinkingLevel();
   const autoHarness = isAutoHarness(lines);
+  const analysisRouting = isAnalysisRouting(lines);
   const questionShortCircuit = isQuestionShortCircuit(lines);
   const strictDecisionMarker = isStrictDecisionMarker(lines);
   // Resolved once: the gate is asked at most one time per pipeline, so a step
@@ -1069,6 +1179,8 @@ export async function runPipeline(
   lastDecision = null;
   lastDecisionReason = "";
   lastReport = null;
+  lastSessionChoice = null;
+  displayDecision = null;
   pipelineActive = true;
   lastProgress = null;
   let touchedModel = false;
@@ -1087,6 +1199,12 @@ export async function runPipeline(
   try {
     for (let i = 0; i < steps.length; i++) {
       const agentName = steps[i];
+      // Per step, never inherited: the previous step's decision and report
+      // belong to it. The report is dropped again before the next step, but the
+      // decision was never cleared, so a second step used to read the first
+      // step's decision as its own.
+      lastDecision = null;
+      lastReport = null;
       const block = agentBlock(lines, agentName);
       if (!block) {
         ctx.ui.notify(`Pipeline stopped: agent "${agentName}" is not defined in the configuration.`, "error");
@@ -1154,13 +1272,16 @@ export async function runPipeline(
       // Step 1 has no total yet: the orchestrator has not decided how many
       // steps this task really needs. Later steps show the real total.
       lastProgress = i === 0 ? agentName : `${i + 1}/${steps.length} ${agentName}`;
-      ctx.ui.setStatus(STATUS_KEY, formatStatus(mode, autoHarness, lastProgress, lastDecision));
+      ctx.ui.setStatus(STATUS_KEY, formatStatus(mode, autoHarness, lastProgress, displayDecision));
       ctx.ui.notify(`[${i + 1}/${steps.length}] ${agentName}${modelRef ? ` (${modelRef})` : ""}`, "info");
 
       // The template body never enters the transcript: this message only
       // points at the file (the agent reads it) and supplies the values the
       // placeholders stand for.
-      if (pendingPreflightBlock.length > 0 && agentMutatesFiles(lines, agentName)) {
+      // The architect is exempt from the blocking gate: a dirty tree is the
+      // normal state while a design is still open, and each turn of a design
+      // session is its own pipeline, so the gate would ask on every message.
+      if (pendingPreflightBlock.length > 0 && agentMutatesFiles(lines, agentName) && agentName !== ARCHITECT_AGENT) {
         const blockers = pendingPreflightBlock;
         pendingPreflightBlock = [];
         if (!(await confirmPreflightBlock(ctx, blockers, agentName))) break;
@@ -1178,7 +1299,7 @@ export async function runPipeline(
       }
       const stepMessage = [
         `[harness] step ${i + 1}/${steps.length} · ${agentName} · mode ${mode}.`,
-        `Read \`${templateRel}\` and follow it exactly. Placeholder values — {{task}}: ${task} | {{mode}}: ${mode} | {{agent}}: ${agentName} | {{step}}: ${i + 1} | {{steps}}: ${steps.length} | {{previous}}: ${formatPreviousStepOutput(previousStepOutput)}`,
+        `Read \`${templateRel}\` and follow it exactly. Placeholder values — {{task}}: ${task} | {{mode}}: ${mode} | {{agent}}: ${agentName} | {{step}}: ${i + 1} | {{steps}}: ${steps.length} | {{requirements_file}}: ${getRequirementsFile(lines)} | {{previous}}: ${formatPreviousStepOutput(previousStepOutput)}`,
       ];
       // The preflight the harness computed belongs in the step prompt, not only
       // in a notification the mutating agent never sees.
@@ -1200,6 +1321,20 @@ export async function runPipeline(
       completed.push(agentName);
       previousStepOutput = turn?.text ?? null;
 
+      // The architect owns the design session: it decides whether the user's
+      // next messages come back to it or go through the orchestrator again.
+      // Nothing else arms or closes it.
+      if (agentName === ARCHITECT_AGENT && lastSessionChoice !== null) {
+        inArchitectSession = lastSessionChoice;
+        ctx.ui.notify(
+          inArchitectSession
+            ? `Architect session open: the next plain message goes straight to the ${ARCHITECT_AGENT}.`
+            : "Architect session closed: the next plain message is routed again.",
+          "info",
+        );
+        lastSessionChoice = null;
+      }
+
       // Questions and no-file-change tasks: the orchestrator answered in this
       // first step, so the remaining pipeline is unnecessary. The decision is
       // read before the report marker below, so a legitimate ANSWER_ONLY answer
@@ -1208,12 +1343,32 @@ export async function runPipeline(
       // tool (its execute ran during the turn); the textual marker is only the
       // fallback for prompts that have not migrated yet.
       const decision = lastDecision ?? parseHarnessDecision(turn?.text ?? "");
+      if (i === 0 && decision !== null) displayDecision = decision;
       if (i === 0 && lastDecisionReason) {
         ctx.ui.notify(`Orchestrator decision: ${decision ?? "(none)"} — ${lastDecisionReason}`, "info");
         lastDecisionReason = "";
       }
-      if (i === 0 && steps.length > 1 && questionShortCircuit) {
+      if (i === 0 && steps.length > 1 && (analysisRouting || questionShortCircuit)) {
         if (decision === "answer_only") {
+          // Conceptual design: hand the conversation to the architect instead of
+          // ending it. The remaining steps are replaced by the analysis
+          // workflow, so the user keeps talking to the architect — and to
+          // nothing else — whatever mode the task started in.
+          const analysisSteps = analysisRouting ? getWorkflowSteps(lines, ANALYSIS_MODE) : null;
+          if (analysisSteps && analysisSteps.length > 0) {
+            steps = analysisSteps;
+            ctx.ui.notify(`Routed to "${ANALYSIS_MODE}": ${steps.join(" -> ")}.`, "info");
+            // The orchestrator has completed and handed over; the architect is
+            // the next step and owes no report.
+            continue;
+          }
+          if (analysisRouting) {
+            ctx.ui.notify(
+              `Routed to "${ANALYSIS_MODE}", but the configuration has no steps for it — ending the pipeline instead. ` +
+                `Add workflows.${ANALYSIS_MODE}.steps or run "npx pi-minimal-harness update".`,
+              "warning",
+            );
+          }
           shortCircuited = true;
           break;
         }
@@ -1240,10 +1395,13 @@ export async function runPipeline(
       // Step 1 is exempt: the orchestrator's job is the decision plus the
       // handoff, not the report contract, and asking it for one would cost an
       // adopter an extra turn on a path that has always worked without it.
+      // The architect is exempt too: it converses with the user, and a
+      // structured report owed on every chat turn is the opposite of a chat.
       // A complete harness_report call satisfies it; the textual marker is the
       // fallback. An incomplete one is repaired exactly once, like a missing
       // report.
-      if (!shortCircuited && decision !== "answer_only" && i > 0) {
+      const owesReport = i > 0 && agentName !== ARCHITECT_AGENT;
+      if (!shortCircuited && decision !== "answer_only" && owesReport) {
         let gaps = reportGaps(lastReport, turn?.text ?? "");
         if (gaps.length > 0) {
           pi.sendUserMessage(reportRepairPrompt(agentName, gaps, stepSections));
@@ -1574,7 +1732,7 @@ export async function composeDispatchSystemPrompt(opts: {
  * the next step, neither of which exists in an isolated subagent.
  */
 export function dispatchUnsupportedAgent(agent: string, lines: string[]): string | null {
-  const firstStep = getWorkflowSteps(lines, getWorkflowMode(lines) ?? "simple")?.[0];
+  const firstStep = getWorkflowSteps(lines, getWorkflowMode(lines) ?? MODE_IDS[0])?.[0];
   if (!firstStep || agent !== firstStep) return null;
   return (
     `"${agent}" cannot run as a dispatched subagent: it is the first step of the active workflow, and its decision ` +
@@ -1658,6 +1816,8 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
     "Critic only: PROCEED, PROCEED WITH CHANGES or BLOCKED; a BLOCKED verdict stops the pipeline before the implementer";
   const lessonsDescription =
     "Findings worth reusing: root causes, gotchas, codebase discoveries, configuration changes. Save them with mem_save when Engram is available; the field carries them either way. Pass [] when there are none; an omitted field makes the report incomplete";
+  const sessionActiveDescription =
+    'Architect only: START to keep the session open for the user\'s next messages, END to close it';
 
   let T: typeof import("typebox").Type | undefined;
   try {
@@ -1684,6 +1844,9 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
         notes: T.Optional(T.String({ description: notesDescription })),
         lessons: T.Optional(T.Array(T.String({ description: lessonsDescription }))),
         verdict: T.Optional(T.String({ description: verdictDescription })),
+      }) as unknown as Record<string, unknown>,
+      harness_session: T.Object({
+        active: T.String({ description: sessionActiveDescription }),
       }) as unknown as Record<string, unknown>,
     };
   }
@@ -1721,6 +1884,13 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
         verdict: { type: "string", description: verdictDescription },
       },
     },
+    harness_session: {
+      type: "object",
+      properties: {
+        active: { type: "string", description: sessionActiveDescription },
+      },
+      required: ["active"],
+    },
   };
 }
 
@@ -1737,7 +1907,7 @@ export function summarize(lines: string[], configPath: string, cwd: string): str
     `Harness config: ${rel}`,
     `defaults.workflow_mode: ${mode}`,
     `defaults.auto_harness: ${isAutoHarness(lines) ? "true" : "false"}`,
-    `defaults.question_short_circuit: ${isQuestionShortCircuit(lines) ? "true" : "false"}`,
+    `defaults.analysis_routing: ${isAnalysisRouting(lines) ? "true" : "false"} (ANSWER_ONLY routes to the architect)`,
     `defaults.allow_dispatch: ${isAllowDispatch(lines) ? "true" : "false"} (context: ${contractText})`,
     `defaults.strict_decision_marker: ${isStrictDecisionMarker(lines) ? "true" : "false"}`,
     `defaults.preflight_policy: ${preflightPolicy(lines)}`,
@@ -1783,8 +1953,23 @@ export async function validate(
 
   const agents = listAgents(lines);
   for (const required of REQUIRED_AGENTS) {
-    checks.push({ label: `agent "${required}" exists`, ok: agents.includes(required) });
+    checks.push({
+      label: `agent "${required}" exists`,
+      ok: agents.includes(required),
+      detail: agents.includes(required) ? "" : 'run "npx pi-minimal-harness update", or add the block from harness.config.example.yaml',
+    });
   }
+
+  // A mode the harness no longer offers is left behind by `update`, which only
+  // adds. It is inert as long as it is not the active mode, but it is a stale
+  // name someone will eventually pick.
+  const knownModes = new Set(MODE_IDS);
+  const staleModes = listWorkflows(lines).filter((name) => !knownModes.has(name));
+  checks.push({
+    label: "every workflow entry is a mode this harness offers",
+    ok: staleModes.length === 0,
+    detail: staleModes.length === 0 ? "" : `unknown: ${staleModes.join(", ")} — safe to delete`,
+  });
 
   for (const agent of agents) {
     const block = agentBlock(lines, agent);
@@ -2108,6 +2293,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     lastDecisionReason = "";
     lastReport = null;
     lastProgress = null;
+    displayDecision = null;
     return refreshModeStatus(ctx);
   });
 
@@ -2120,22 +2306,26 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     };
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return {};
     let decision: HarnessDecision = null;
+    let sessionChoice: boolean | null = null;
     let changed = false;
     const content = message.content.map((part) => part);
-    // Only the last text part can carry the decision line. A marker quoted
+    // Only the last text part can carry the marker lines. A marker quoted
     // earlier belongs to the prose and is left visible: stripping it would
     // delete the sentence the model wrote and let the example decide.
     for (let p = content.length - 1; p >= 0; p--) {
       const part = content[p];
       if (part?.type !== "text" || !part.text) continue;
       const split = splitDecisionLine(part.text);
-      if (!split.hadMarker) continue;
-      decision = split.decision;
+      const session = splitSessionLine(split.rest);
+      if (!split.hadMarker && !session.hadMarker) continue;
+      if (split.hadMarker) decision = split.decision;
+      if (session.hadMarker) sessionChoice = session.active;
       changed = true;
-      content[p] = { ...part, text: split.rest };
+      content[p] = { ...part, text: session.rest };
       break;
     }
     if (!changed) return {};
+    if (sessionChoice !== null && lastSessionChoice === null) lastSessionChoice = sessionChoice;
     if (decision !== null) {
       // Only when still empty: a harness_decision call runs after this hook
       // (the runtime emits message_end, then executes tool calls) and must
@@ -2156,6 +2346,19 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     if (pipelineRunning) return { action: "continue" };
     const task = event.text.trim();
     if (!task || task.startsWith("/")) return { action: "continue" };
+    // Sticky architect session: the user keeps talking to the architect, so the
+    // orchestrator does not route again. Checked after the slash-command guard
+    // so /harness-mode and the rest still reach their own commands, and after
+    // pipelineRunning so a turn already in flight is never overlapped.
+    if (inArchitectSession) {
+      pipelineRunning = true;
+      void runPipeline(pi, ctx, task, () => pollIdle(ctx), ANALYSIS_MODE, ARCHITECT_AGENT)
+        .catch((error) => ctx.ui.notify(`harness pipeline failed: ${String(error)}`, "error"))
+        .finally(() => {
+          pipelineRunning = false;
+        });
+      return { action: "handled" };
+    }
     try {
       const configPath = await resolveConfigPath(ctx.cwd);
       if (!configPath) return { action: "continue" };
@@ -2282,7 +2485,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       const task = args.trim() || "Deliver the current verified changes.";
       pipelineRunning = true;
       try {
-        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), "delivery-only", "delivery");
+        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), "full", "delivery");
       } catch (error) {
         ctx.ui.notify(`Delivery failed: ${String(error)}`, "error");
       } finally {
@@ -2641,6 +2844,50 @@ export default async function harnessExtension(pi: ExtensionAPI) {
             {
               type: "text" as const,
               text: `Report recorded: ${changedFiles?.length ?? 0} file(s), ${checks?.length ?? 0} check(s), ${lessons?.length ?? 0} lesson(s).`,
+            },
+          ],
+          details: undefined,
+        };
+      },
+    });
+
+    pi.registerTool({
+      name: "harness_session",
+      label: "Architect session",
+      description: [
+        "Open or close the architect's multi-turn design session.",
+        "START keeps the user's next messages going straight to the architect; END sends them back through the orchestrator.",
+        "Call it once, at the end of the turn, instead of writing a HARNESS-SESSION line.",
+      ].join(" "),
+      promptSnippet: "Architect only: keep the design conversation open with harness_session(START), close it with harness_session(END).",
+      promptGuidelines: [
+        "Call harness_session exactly once, at the end of an architect turn, when the user should keep talking to you.",
+        "The first turn of a design session is not sticky by itself: arm it only when the user wants to keep designing.",
+        "Do not call it in ordinary conversation: it only has an effect inside an architect turn.",
+      ],
+      parameters: controlParams.harness_session as never,
+      async execute(_toolCallId, params) {
+        const raw = (params as { active?: unknown }).active;
+        const active = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+        if (active !== "START" && active !== "END") {
+          throw new Error('active must be "START" or "END".');
+        }
+        if (!pipelineActive) {
+          return {
+            content: [{ type: "text" as const, text: "Recorded. (No harness pipeline is running, so this has no effect.)" }],
+            details: undefined,
+          };
+        }
+        // Unconditional, like the other control tools: this runs after the
+        // message_end hook, so a guard here would let the text marker win.
+        lastSessionChoice = active === "START";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: active === "START"
+                ? "Session stays open: the next messages go straight to the architect."
+                : "Session closed: the next message goes through the orchestrator again.",
             },
           ],
           details: undefined,

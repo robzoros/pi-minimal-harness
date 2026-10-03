@@ -110,7 +110,7 @@ Cover:
 - the linked issue, when the repository requires issue-linked pull requests;
 - the files committed;
 - the checks reported as run, and the ones that could not run. The
-  implementer's report is the source of truth; in `delivery-only`, the
+  implementer's report is the source of truth; with no implementer report, the
   verification evidence in the orchestrator's handoff. The delivery agent has
   no test runner, so it never claims a check it did not see reported.
 

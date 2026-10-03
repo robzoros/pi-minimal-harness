@@ -48,6 +48,8 @@ test("init --dry-run reports changes without writing", async () => {
     assert.equal(await fs.access(path.join(project, ".pi", "extensions", "harness.ts")).then(() => true, () => false), false);
     assert.match(result.stdout, /create CHANGELOG\.md/);
     assert.equal(await exists(path.join(project, "CHANGELOG.md")), false);
+    assert.match(result.stdout, /create REQUIREMENTS\.md/);
+    assert.equal(await exists(path.join(project, "REQUIREMENTS.md")), false);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
@@ -257,7 +259,7 @@ test("a fresh install reports the template placeholders it shipped", async () =>
   try {
     const result = runInstaller(["init", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /warning 5 agent\(s\) still use the template model placeholder/);
+    assert.match(result.stdout, /warning 6 agent\(s\) still use the template model placeholder/);
     assert.match(result.stdout, /warning project: is still the template placeholder/);
 
     // Once the models are real the warning goes away, and dry-run shows it too.
@@ -429,6 +431,78 @@ test("update replaces upstream files and keeps the local indentation width", asy
     const agents = await fs.readFile(path.join(project, "AGENTS.md"), "utf8");
     assert.equal((agents.match(/<!-- BEGIN pi-minimal-harness -->/g) ?? []).length, 1);
     assert.match(agents, /^## pi-minimal-harness instructions$/m);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("init and update create the requirements file, and never overwrite one", async () => {
+  const project = await tempProject();
+  try {
+    const first = runInstaller(["init", "--project", project]);
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /create REQUIREMENTS\.md/);
+    const requirements = await fs.readFile(path.join(project, "REQUIREMENTS.md"), "utf8");
+    assert.match(requirements, /^# Requirements$/m);
+    assert.match(requirements, /^## Additions$/m);
+
+    // Project-owned, exactly like the changelog: `update` leaves it alone.
+    const own = "# Requirements\n\n- our own scope\n";
+    await fs.writeFile(path.join(project, "REQUIREMENTS.md"), own, "utf8");
+    const again = runInstaller(["update", "--project", project]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /unchanged REQUIREMENTS\.md/);
+    assert.equal(await fs.readFile(path.join(project, "REQUIREMENTS.md"), "utf8"), own);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("update migrates a retired defaults.workflow_mode to a mode that exists", async () => {
+  const project = await tempProject();
+  try {
+    runInstaller(["init", "--project", project]);
+    const config = path.join(project, "harness.config.yaml");
+    // The merge is additive and never overwrites a local scalar, so an
+    // installation on a retired mode would keep it and then resolve a mode
+    // with no steps.
+    await fs.writeFile(
+      config,
+      (await fs.readFile(config, "utf8")).replace(/^ {2}workflow_mode: .*$/m, "  workflow_mode: delivery-only"),
+    );
+
+    const dry = runInstaller(["update", "--project", project, "--dry-run"]);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, /migrate .*workflow_mode "delivery-only" is gone, using "full"/);
+    assert.match(await fs.readFile(config, "utf8"), /^ {2}workflow_mode: delivery-only$/m);
+
+    const migrated = runInstaller(["update", "--project", project]);
+    assert.equal(migrated.status, 0, migrated.stderr);
+    assert.match(await fs.readFile(config, "utf8"), /^ {2}workflow_mode: full$/m);
+
+    // Idempotent: a second update has nothing to migrate.
+    const again = runInstaller(["update", "--project", project]);
+    assert.doesNotMatch(again.stdout, /migrate .*workflow_mode/);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("update adds the architect agent to a configuration that predates it", async () => {
+  const project = await tempProject();
+  try {
+    await fs.writeFile(path.join(project, "harness.config.yaml"), LOCAL_CONFIG);
+    const result = runInstaller(["update", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    const config = await fs.readFile(path.join(project, "harness.config.yaml"), "utf8");
+    // A wholly missing nested mapping is inserted whole, so a required new
+    // agent cannot leave an existing installation failing validation.
+    assert.match(config, /^ {2}architect:$/m);
+    assert.match(config, /^ {2}analysis:$/m);
+    // The project's own values are untouched.
+    assert.match(config, /^project: local-project$/m);
+    assert.match(config, /^ {2}my_own_key: keep-me$/m);
+    assert.match(config, /^ {6}- only-me$/m);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }
