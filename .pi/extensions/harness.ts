@@ -65,12 +65,18 @@ let pipelineActive = false;
 
 export type CheckResult = "passed" | "failed" | "skipped";
 
+/** The critic's verdict, normalized; null for an agent that does not issue one. */
+export type HarnessVerdict = "proceed" | "proceed_with_changes" | "blocked" | null;
+
 export interface HarnessReport {
   /** null when the field was omitted; [] when it was passed with nothing in it. */
   changedFiles: string[] | null;
   checks: { command: string; result: CheckResult }[] | null;
   lessons: string[] | null;
-  notes: string;
+  /** null when the field was omitted; "" is the explicit "nothing to tell delivery". */
+  notes: string | null;
+  /** The critic's verdict; null for the agents that do not assess a plan. */
+  verdict: HarnessVerdict;
 }
 
 /** Normalize a decision argument from a tool call: models are case-sloppy. */
@@ -88,6 +94,19 @@ function normalizeCheckResult(value: unknown): CheckResult {
   if (key === "passed" || key === "pass" || key === "ok") return "passed";
   if (key === "failed" || key === "fail") return "failed";
   return "skipped";
+}
+
+/**
+ * Normalize the critic's verdict; anything unrecognized reads as "no verdict"
+ * so a cosmetic slip never blocks a pipeline by accident.
+ */
+export function normalizeVerdict(value: unknown): HarnessVerdict {
+  if (typeof value !== "string") return null;
+  const key = value.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (key === "PROCEED") return "proceed";
+  if (key === "PROCEED_WITH_CHANGES") return "proceed_with_changes";
+  if (key === "BLOCKED") return "blocked";
+  return null;
 }
 
 /**
@@ -273,6 +292,44 @@ export function getAgentTools(lines: string[], agent: string): string[] {
     if (item) tools.push(item[1]);
   }
   return tools;
+}
+
+/** Skills declared for an agent, in config order ([] when it declares none). */
+export function getAgentSkills(lines: string[], agent: string): string[] {
+  const block = agentBlock(lines, agent);
+  if (!block) return [];
+  let inSkills = false;
+  const skills: string[] = [];
+  for (let i = block.start; i < block.end; i++) {
+    if (/^ {4}skills:\s*$/.test(lines[i])) {
+      inSkills = true;
+      continue;
+    }
+    if (!inSkills) continue;
+    if (/^ {4}\S/.test(lines[i])) break;
+    const item = lines[i].match(/^ {6}-\s+(\S+)\s*$/);
+    if (item) skills.push(item[1]);
+  }
+  return skills;
+}
+
+/** `skills.project_directory` with a fallback; where the project keeps skills. */
+export function getSkillsDirectory(lines: string[]): string {
+  const section = topLevelSection(lines, "skills");
+  if (section) {
+    for (let i = section.start; i < section.end; i++) {
+      const match = lines[i].match(/^ {2}project_directory:\s*(\S+)\s*$/);
+      if (match) return match[1];
+    }
+  }
+  return ".agents/skills";
+}
+
+/** Resolve a declared project skill to its SKILL.md, or null when it is absent. */
+export function resolveSkillPath(cwd: string, configPath: string, name: string, lines: string[]): string | null {
+  const relative = path.join(getSkillsDirectory(lines), name, "SKILL.md");
+  const candidates = [path.resolve(path.dirname(configPath), relative), path.resolve(cwd, relative)];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
 function getBlockField(lines: string[], block: { start: number; end: number }, field: string): string | null {
@@ -701,30 +758,70 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * identifiable in the transcript, and the gaps so the agent knows exactly
  * which field to add instead of rewriting a report that was nearly right.
  */
-function reportRepairPrompt(agentName: string, gaps: string[]): string {
+function reportRepairPrompt(agentName: string, gaps: string[], sections: string[] = []): string {
   const detail = gaps.length > 0 ? ` Its report is missing: ${gaps.join(", ")}.` : "";
+  // The repair turn must not contradict the prompt the step was given: an
+  // explorer owes `### Findings`, a critic `### Verdict`, a delivery agent
+  // `### Delivery`. Only the tool call is actually validated (`reportGaps`),
+  // so the sections are quoted for the reader, never demanded as a format.
+  const format =
+    sections.length > 0 ? ` Its own prompt asks for these sections, in this order: ${sections.join(" / ")}.` : "";
   return (
-    `The previous response from "${agentName}" ended without a complete completion report: no \`harness_report\` call and no \`HARNESS-DONE\` marker, and no complete report in the required format (### Changes / ### Evidence / ### Notes for delivery / ### Lessons).` +
-    `${detail} Write the full report now and call harness_report(changed_files, checks, notes, lessons) — or end with \`HARNESS-DONE\` if the tool is unavailable. ` +
-    "Pass `[]` for a field that is genuinely empty; omitting a field is what makes the report incomplete."
+    `The previous response from "${agentName}" ended without a complete completion report: no \`harness_report\` call and no \`HARNESS-DONE\` marker.${format}` +
+    `${detail} Write the full report now and call harness_report(changed_files, checks, notes, lessons) — the tool call is what the harness verifies; the sections are for the reader. ` +
+    'Or end with `HARNESS-DONE` if the tool is unavailable. Pass `[]` for a field with an empty list and `""` for empty notes; omitting a field is what makes the report incomplete.'
   );
+}
+
+/** The `###` sections a prompt template requires, in order. */
+export function reportSectionsFromTemplate(template: string): string[] {
+  return Array.from(template.matchAll(/^### .+$/gm), (match) => match[0].trim());
+}
+
+/**
+ * What the next step is told about the previous step's reply. The runtime keeps
+ * the whole transcript, but an agent that reads only its own prompt must be able
+ * to find the handoff it is told to expect — so it is quoted here, bounded.
+ */
+export function formatPreviousStepOutput(text: string | null | undefined): string {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return "none (this step has no prior output)";
+  const bytes = Buffer.byteLength(trimmed, "utf8");
+  if (bytes <= PREVIOUS_OUTPUT_CAP) return trimmed;
+  const cut = Buffer.from(trimmed, "utf8").subarray(0, PREVIOUS_OUTPUT_CAP).toString("utf8");
+  return `${cut}\n…[${bytes - PREVIOUS_OUTPUT_CAP} chars omitted]`;
+}
+
+/**
+ * True when the reply ends with the textual `HARNESS-DONE` fallback on its
+ * last non-empty line. The marker counts only there, exactly as the prompts
+ * state: mentioning it in prose must not satisfy the report contract.
+ */
+export function endsWithHarnessDone(text: string): boolean {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].trim()) continue;
+    return /\bHARNESS-DONE\b/.test(lines[i]);
+  }
+  return false;
 }
 
 /**
  * What a finished step is still missing before its report counts.
  *
  * The textual `HARNESS-DONE` fallback cannot be inspected, so it stays a
- * complete report. A `harness_report` call counts only when it carries
- * every field the report contract names: an agent with nothing to record
- * says so with `[]`, while an omitted or blank field is a gap and earns the
- * same single repair turn as a missing report.
+ * complete report. A `harness_report` call counts only when it carries every
+ * field the report contract names: an agent with nothing to record says so
+ * with `[]` for a list and `""` for notes, while an omitted or blank field is
+ * a gap and earns the same single repair turn as a missing report.
  */
 export function reportGaps(report: HarnessReport | null, text: string): string[] {
-  if (/\bHARNESS-DONE\b/.test(text)) return [];
+  if (endsWithHarnessDone(text)) return [];
   if (!report) return ["harness_report call"];
   const gaps: string[] = [];
   if (!Array.isArray(report.changedFiles)) gaps.push("changed_files");
   if (!Array.isArray(report.checks)) gaps.push("checks");
+  if (typeof report.notes !== "string") gaps.push("notes");
   if (!Array.isArray(report.lessons)) gaps.push("lessons");
   return gaps;
 }
@@ -978,7 +1075,12 @@ export async function runPipeline(
   let touchedThinking = false;
   let shortCircuited = false;
   let reportMissing = false;
+  let blockedByCritic = false;
   const completed: string[] = [];
+  // The reply of the previous step, quoted into the next step's prompt: the
+  // handoff a step is told to expect has to be reachable from its own prompt,
+  // not only from the transcript the agent happens to see.
+  let previousStepOutput: string | null = null;
 
   ctx.ui.notify(`Pipeline "${mode}": ${steps.length} steps — ${steps.join(" -> ")}`, "info");
 
@@ -1044,6 +1146,10 @@ export async function runPipeline(
         ctx.ui.notify(`Pipeline stopped: prompt template not found for "${agentName}": ${templateRel}`, "error");
         break;
       }
+      // The body never enters the transcript (the step is told to read the
+      // file), so the driver reads it too: this step's own report sections are
+      // what a repair turn must ask for.
+      const stepSections = reportSectionsFromTemplate(await fs.readFile(templatePath, "utf8"));
 
       // Step 1 has no total yet: the orchestrator has not decided how many
       // steps this task really needs. Later steps show the real total.
@@ -1060,13 +1166,26 @@ export async function runPipeline(
         if (!(await confirmPreflightBlock(ctx, blockers, agentName))) break;
       }
 
-      pi.sendUserMessage(
-        [
-          `[harness] step ${i + 1}/${steps.length} · ${agentName} · mode ${mode}.`,
-          `Read \`${templateRel}\` and follow it exactly. Placeholder values — {{task}}: ${task} | {{mode}}: ${mode} | {{agent}}: ${agentName} | {{step}}: ${i + 1} | {{steps}}: ${steps.length} | {{previous}}: from this conversation.`,
-          `Task: ${task}`,
-        ].join("\n"),
-      );
+      // Declared project skills are injected, not just referenced: a step that
+      // lists `skills:` must receive their content, and a dispatched subagent
+      // gets them through its system prompt.
+      const skillBodies: string[] = [];
+      for (const skill of getAgentSkills(lines, agentName)) {
+        const skillPath = resolveSkillPath(ctx.cwd, configPath, skill, lines);
+        if (!skillPath) continue;
+        const body = decodeText(await fs.readFile(skillPath, "utf8")).trim();
+        if (body) skillBodies.push(body);
+      }
+      const stepMessage = [
+        `[harness] step ${i + 1}/${steps.length} · ${agentName} · mode ${mode}.`,
+        `Read \`${templateRel}\` and follow it exactly. Placeholder values — {{task}}: ${task} | {{mode}}: ${mode} | {{agent}}: ${agentName} | {{step}}: ${i + 1} | {{steps}}: ${steps.length} | {{previous}}: ${formatPreviousStepOutput(previousStepOutput)}`,
+      ];
+      // The preflight the harness computed belongs in the step prompt, not only
+      // in a notification the mutating agent never sees.
+      if (repositoryWarning) stepMessage.push(repositoryWarning);
+      if (skillBodies.length > 0) stepMessage.push("Project skill(s) for this step:", ...skillBodies);
+      stepMessage.push(`Task: ${task}`);
+      pi.sendUserMessage(stepMessage.join("\n"));
       await waitForTurn();
 
       const turn = lastAssistantTurn(ctx);
@@ -1079,6 +1198,7 @@ export async function runPipeline(
         break;
       }
       completed.push(agentName);
+      previousStepOutput = turn?.text ?? null;
 
       // Questions and no-file-change tasks: the orchestrator answered in this
       // first step, so the remaining pipeline is unnecessary. The decision is
@@ -1126,7 +1246,7 @@ export async function runPipeline(
       if (!shortCircuited && decision !== "answer_only" && i > 0) {
         let gaps = reportGaps(lastReport, turn?.text ?? "");
         if (gaps.length > 0) {
-          pi.sendUserMessage(reportRepairPrompt(agentName, gaps));
+          pi.sendUserMessage(reportRepairPrompt(agentName, gaps, stepSections));
           await waitForTurn();
           const repaired = lastAssistantTurn(ctx);
           gaps = reportGaps(lastReport, repaired?.text ?? "");
@@ -1139,9 +1259,13 @@ export async function runPipeline(
             break;
           }
         }
+        // A critic that blocks the plan stops the pipeline: the file-mutating
+        // steps never run, and the critic's report stands as the final answer.
+        if (lastReport?.verdict === "blocked") blockedByCritic = true;
         // The report belongs to this step only: forget it before the next one.
         lastReport = null;
       }
+      if (blockedByCritic) break;
     }
   } finally {
     if (touchedModel && originalModel) {
@@ -1170,6 +1294,11 @@ export async function runPipeline(
     }
   } else if (shortCircuited) {
     ctx.ui.notify(`Pipeline "${mode}": orchestrator answered directly — remaining steps skipped.`, "info");
+  } else if (blockedByCritic) {
+    ctx.ui.notify(
+      `Pipeline "${mode}": critic verdict BLOCKED — stopped before the file-mutating steps; the critic report is the final answer.`,
+      "warning",
+    );
   } else {
     ctx.ui.notify(`Pipeline "${mode}" stopped after ${completed.length}/${steps.length} steps.`, "warning");
   }
@@ -1182,6 +1311,8 @@ export async function runPipeline(
 const DISPATCH_MAX_TASKS = 8;
 const DISPATCH_CONCURRENCY = 4;
 const DISPATCH_OUTPUT_CAP = 50 * 1024;
+/** Bound for the previous step's reply quoted into the next step's prompt. */
+const PREVIOUS_OUTPUT_CAP = 4 * 1024;
 
 export interface DispatchTaskResult {
   agent: string;
@@ -1375,10 +1506,26 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-/** Two-channel system prompt: rendered agent template + the stable contract. */
-async function composeDispatchSystemPrompt(opts: {
+/**
+ * The adopting project's own rules file, when it has one. A dispatched
+ * subagent receives the harness contract (generic, from `resolveContractPath`);
+ * without this the project's rules would silently not apply to it.
+ */
+export function resolveProjectRulesPath(configPath?: string, cwd?: string): string | null {
+  const base = cwd ?? (configPath ? path.dirname(configPath) : process.cwd());
+  const candidate = path.join(base, "AGENTS.md");
+  return existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Three-channel system prompt: rendered agent template, the stable contract,
+ * and the project's own rules when it has them.
+ */
+export async function composeDispatchSystemPrompt(opts: {
   templatePath: string;
   contractPath: string;
+  projectRulesPath?: string | null;
+  skillBodies?: string[];
   agent: string;
   brief: string;
 }): Promise<string> {
@@ -1396,8 +1543,44 @@ async function composeDispatchSystemPrompt(opts: {
     steps: "-",
     previous: "",
   });
-  const contract = await fs.readFile(opts.contractPath, "utf8");
-  return `${rendered.trimEnd()}\n\n---\n\n${contract.trimEnd()}\n`;
+  const contract = decodeText(await fs.readFile(opts.contractPath, "utf8"));
+  const parts: string[] = [`${rendered.trimEnd()}\n`];
+  // Declared project skills are injected, not merely referenced: the subagent
+  // must receive their content or the `skills:` config is decorative.
+  if (opts.skillBodies && opts.skillBodies.length > 0) {
+    const skills = opts.skillBodies
+      .map((body) => body.trim())
+      .filter(Boolean)
+      .join("\n\n---\n\n");
+    if (skills) parts.push(`\n---\n\nProject skill(s) for this agent:\n\n${skills}\n`);
+  }
+  parts.push(`\n---\n\n${contract.trimEnd()}\n`);
+  // Project rules come last: pi-minimal-harness.md states that AGENTS.md wins
+  // on conflict, and that is only true if it is read last.
+  if (opts.projectRulesPath && existsSync(opts.projectRulesPath)) {
+    const rules = decodeText(await fs.readFile(opts.projectRulesPath, "utf8")).trimEnd();
+    if (rules) {
+      parts.push(
+        `\n---\n\nProject rules (${path.basename(opts.projectRulesPath)}). On conflict with the harness contract above, these win.\n\n${rules}\n`,
+      );
+    }
+  }
+  return parts.join("");
+}
+
+/**
+ * Agents that cannot be dispatched. The pipeline's first step only makes sense
+ * inside a run: its decision short-circuits that pipeline and its handoff targets
+ * the next step, neither of which exists in an isolated subagent.
+ */
+export function dispatchUnsupportedAgent(agent: string, lines: string[]): string | null {
+  const firstStep = getWorkflowSteps(lines, getWorkflowMode(lines) ?? "simple")?.[0];
+  if (!firstStep || agent !== firstStep) return null;
+  return (
+    `"${agent}" cannot run as a dispatched subagent: it is the first step of the active workflow, and its decision ` +
+    `and handoff address the next step of a pipeline that does not exist in an isolated process. ` +
+    `Dispatch a leaf agent instead. Available: ${listAgents(lines).join(", ")}`
+  );
 }
 
 /**
@@ -1407,7 +1590,7 @@ async function composeDispatchSystemPrompt(opts: {
  * without npm dependencies.
  */
 async function buildDispatchParams(): Promise<Record<string, unknown>> {
-  const agentDescription = "Configured agent: orchestrator, explorer, critic, implementer or delivery";
+  const agentDescription = "Configured leaf agent: explorer, critic, implementer or delivery";
   const briefDescription =
     "Curated brief: objective, relevant files with line refs, constraints, acceptance criteria, expected evidence, non-goals, unknowns";
   const tasksDescription = "Independent tasks to run in isolated background agents";
@@ -1470,9 +1653,11 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
   const changedFilesDescription = "Repository-relative paths this step changed";
   const commandDescription = "The check command as it was run";
   const resultDescription = "passed | failed | skipped";
-  const notesDescription = "What the delivery step must know";
+  const notesDescription = 'What the delivery step must know; pass "" when there is nothing';
+  const verdictDescription =
+    "Critic only: PROCEED, PROCEED WITH CHANGES or BLOCKED; a BLOCKED verdict stops the pipeline before the implementer";
   const lessonsDescription =
-    "Findings worth reusing: root causes, gotchas, codebase discoveries, configuration changes — the same ones saved with mem_save. Pass [] when there are none; an omitted field makes the report incomplete";
+    "Findings worth reusing: root causes, gotchas, codebase discoveries, configuration changes. Save them with mem_save when Engram is available; the field carries them either way. Pass [] when there are none; an omitted field makes the report incomplete";
 
   let T: typeof import("typebox").Type | undefined;
   try {
@@ -1498,6 +1683,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
         ),
         notes: T.Optional(T.String({ description: notesDescription })),
         lessons: T.Optional(T.Array(T.String({ description: lessonsDescription }))),
+        verdict: T.Optional(T.String({ description: verdictDescription })),
       }) as unknown as Record<string, unknown>,
     };
   }
@@ -1532,6 +1718,7 @@ async function buildControlToolParams(): Promise<Record<string, unknown> | null>
           items: { type: "string" },
           description: lessonsDescription,
         },
+        verdict: { type: "string", description: verdictDescription },
       },
     },
   };
@@ -1653,6 +1840,16 @@ export async function validate(
       if (!rel) continue;
       const resolved = await resolvePromptTemplatePath(baseCwd, configPath, rel);
       checks.push({ label: `agent "${agent}" prompt_template file exists`, ok: !!resolved, detail: rel });
+    }
+    for (const agent of agents) {
+      for (const skill of getAgentSkills(lines, agent)) {
+        const resolved = resolveSkillPath(baseCwd, configPath, skill, lines);
+        checks.push({
+          label: `agent "${agent}" skill "${skill}" exists`,
+          ok: !!resolved,
+          detail: resolved ? path.relative(baseCwd, resolved) || skill : `${skill}/SKILL.md (missing)`,
+        });
+      }
     }
   }
 
@@ -2130,7 +2327,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     label: "Harness dispatch",
     description: [
       "Dispatch independent background tasks to isolated harness agents (separate pi processes with their own context).",
-      "Each task carries a curated brief — the only task context the subagent receives; the project rules are injected as its system prompt.",
+      "Each task carries a curated brief — the only task context the subagent receives; its system prompt is the agent's prompt template, the harness contract, and the project's AGENTS.md when the project has one.",
       `Up to ${DISPATCH_MAX_TASKS} tasks, ${DISPATCH_CONCURRENCY} run at a time.`,
     ].join(" "),
     promptSnippet: "Delegate independent, read-heavy work to isolated harness agents with a curated brief.",
@@ -2168,6 +2365,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         );
       }
       const contractPath = contract.path;
+      const projectRulesPath = resolveProjectRulesPath(configPath, ctx.cwd);
 
       interface Prepared {
         agent: string;
@@ -2187,6 +2385,8 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         throw new Error(message);
       };
       for (const task of tasks) {
+        const unsupported = dispatchUnsupportedAgent(task.agent, lines);
+        if (unsupported) return failPrepared(unsupported);
         const block = agentBlock(lines, task.agent);
         if (!block) {
           return failPrepared(`Unknown agent "${task.agent}". Available: ${listAgents(lines).join(", ")}`);
@@ -2208,9 +2408,18 @@ export default async function harnessExtension(pi: ExtensionAPI) {
             `Agent "${task.agent}" effort "${thinking}" is not supported by "${model.provider}/${model.id}". Available: ${supportedReasoningLevels(model).join(", ")}.`,
           );
         }
+        const skillBodies: string[] = [];
+        for (const skill of getAgentSkills(lines, task.agent)) {
+          const skillPath = resolveSkillPath(ctx.cwd, configPath, skill, lines);
+          if (!skillPath) continue;
+          const body = decodeText(await fs.readFile(skillPath, "utf8")).trim();
+          if (body) skillBodies.push(body);
+        }
         const systemPrompt = await composeDispatchSystemPrompt({
           templatePath,
           contractPath,
+          projectRulesPath,
+          skillBodies,
           agent: task.agent,
           brief,
         });
@@ -2404,6 +2613,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
           checks?: unknown;
           notes?: unknown;
           lessons?: unknown;
+          verdict?: unknown;
         };
         // A field the agent omitted (or sent blank) stays null so the driver can
         // call it a gap; [] is the explicit "nothing to record" and is complete.
@@ -2423,7 +2633,8 @@ export default async function harnessExtension(pi: ExtensionAPI) {
           changedFiles,
           checks,
           lessons,
-          notes: typeof raw.notes === "string" ? raw.notes : "",
+          notes: typeof raw.notes === "string" ? raw.notes : null,
+          verdict: normalizeVerdict(raw.verdict),
         };
         return {
           content: [

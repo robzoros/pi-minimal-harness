@@ -34,13 +34,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `harness_report.notes` was documented as required but never validated, so a
+  report that omitted it still counted as complete. It is now a gap like the
+  other fields (`null` when omitted, `""` when the agent has nothing to say),
+  and the prompts say `""` is how empty notes are passed.
+- The `HARNESS-DONE` fallback counted when the word appeared anywhere in the
+  reply, while the prompts ask for it as the last line. It now only counts on
+  the last non-empty line, so mentioning the marker in prose no longer satisfies
+  the report contract.
+- The `harness-dispatch` parameter schema advertised `orchestrator` as a valid
+  agent even though the runtime refuses the first step of the active workflow.
+  The description now names only the leaf agents that can actually be
+  dispatched.
+- `pi-minimal-harness.md` described every report as `### Changes` / `###
+  Evidence` / `### Notes for delivery` / `### Lessons`, a shape only the
+  implementer uses; it now defers to each agent's own prompt template.
+- The dispatch tool's schema and `composeDispatchSystemPrompt` claimed a
+  system prompt built from the template, the contract and `AGENTS.md`, but the
+  configured `skills:` list was never injected. Declared project skills are now
+  read and injected into the step message and the subagent's system prompt, and
+  validation fails when a declared skill file is missing.
 - A `harness_report` call made during the orchestrator's turn satisfied the
   report guarantee of the *next* step, so a step that reported nothing was
   taken as reported. The report is now cleared after step 1, which is exempt
   from the guarantee anyway.
+- A dispatched subagent got the harness contract but not the adopting project's
+  `AGENTS.md`, while `harness-dispatch` and the orchestrator prompt both claimed
+  the project rules were injected as its system prompt. Project rules are now
+  resolved and appended after the contract — read last, so they win on conflict —
+  and the documentation states exactly what is injected.
+- The report repair turn asked every step for the implementer's report shape
+  (`### Changes` / `### Evidence` / `### Notes for delivery` / `### Lessons`),
+  contradicting the prompt an explorer, a critic or a delivery step had just
+  followed. It now quotes the sections of that step's own template, and says
+  that the `harness_report` call is what the harness verifies.
+- `{{previous}}` was the literal string "from this conversation" in every step
+  message, so the handoff a step was told to expect was only reachable from the
+  transcript. It now carries the previous step's reply, bounded to 4 KiB with an
+  omission marker, or an explicit "none" when there is no prior output.
+- The explorer prompt told the agent to review the orchestrator's handoff "in
+  this conversation", which is unsatisfiable for a dispatched subagent.
+- The delivery prompt and the `github-delivery` skill asked for a test plan the
+  delivery agent cannot produce: its tools carry no shell or test runner. Both
+  now take the implementer's report as the source of truth and forbid claiming a
+  check that was never reported.
+- `harness-dispatch` accepted the orchestrator as a task agent, producing a
+  subagent whose decision and handoff address a pipeline it does not run. The
+  first step of the active workflow is now refused with an explanation.
+- `harness.config.yaml` saved as UTF-16 was read as UTF-8, so every line carried
+  NUL bytes, the configuration parsed as empty and every run failed with "No
+  agents found in the configuration". Text files are now decoded through a BOM
+  aware helper.
 
 ### Changed
 
+- The delivery contract asks before creating what it is missing, instead of
+  stopping on it. When the repository requires issue-linked pull requests and
+  the handoff carries no issue, the delivery step asked the user to authorize
+  creating one — naming the title it would use — and stopped; it never invented
+  a number and never created one unasked. The same holds for the branch when
+  the target is a choice the agent cannot make (work already on a branch with an
+  open or reviewed pull request); creating a fresh branch from the base branch
+  stays the mechanical default and still needs no permission. A denial is
+  reported as the reason delivery did not happen. The request is what the turn
+  ends with, because the delivery agent cannot block on an answer inside its
+  own turn. Previously the agent stopped and reported the gap, so an ordinary
+  delivery failed on a missing issue instead of asking for it.
+- The critic's verdict is a real field: `harness_report` takes a `verdict`
+  (`PROCEED`, `PROCEED WITH CHANGES` or `BLOCKED`), and a `BLOCKED` verdict
+  stops the pipeline before the file-mutating steps, with the critic report as
+  the final answer. Previously the verdict was prose the pipeline could not act
+  on.
+- Responsibility for the issue number is explicit: the orchestrator identifies
+  (or creates) the issue and passes it in its handoff, the implementer carries
+  it in `### Notes for delivery`, and delivery uses it for `Closes #N` instead
+  of inventing one. `delivery-only` uses the verification evidence the
+  orchestrator quotes in its handoff, since there is no implementer report.
+- `CHANGELOG.md` has one owner again: the implementer edits it, and the
+  `github-delivery` skill only verifies the entry (delivery has no
+  file-editing tools and previously was told to update it).
+- The repository preflight warning is injected into the step message, not only
+  shown in a notification the file-mutating agent never sees.
+- The critic is told to read `AGENTS.md`; the `type:*` label is derived from
+  the commit type and the PR template (stopping when ambiguous); the
+  orchestrator/explorer boundary and the `delivery-only` preconditions are
+  spelled out in the prompts; and `docs/WORKFLOW.md` no longer assigns OpenSpec
+  or prompt authoring to the orchestrator.
 - The contract is now a standalone file, `pi-minimal-harness.md`, instead of a
   section pasted into the adopting project's `AGENTS.md`. `init` and `update`
   copy the file to the project root and add a reference to `AGENTS.md` instead

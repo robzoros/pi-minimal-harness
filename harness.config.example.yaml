@@ -56,6 +56,9 @@ agents:
       # The orchestrator runs in every mode, so structural exploration belongs
       # here too; remove the line when CodeGraph is not installed.
       - codegraph
+      # The orchestrator identifies (or creates) the issue the delivery step
+      # must close, so it needs the GitHub tool as well.
+      - github
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task

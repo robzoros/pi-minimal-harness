@@ -40,10 +40,10 @@ workflow you can actually audit.
 | Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
-| Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs |
+| Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs; each subagent's system prompt is its own prompt template, its declared project skills, the harness contract and the project's `AGENTS.md` (when present, read last so project rules win) |
 | Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
 | Upgrade | `npx pi-minimal-harness update` refreshes upstream files and **only adds** missing keys to your config |
-| Tests | `node tests/harness.test.mjs` (139 checks) and `node tests/install.test.mjs` (8 installer tests) |
+| Tests | `node tests/harness.test.mjs` (196 checks) and `node tests/install.test.mjs` (15 installer tests) |
 
 ## Install in your Pi project
 
@@ -335,11 +335,13 @@ out of a reply:
 | Tool | Called by | Arguments |
 |---|---|---|
 | `harness_decision` | the orchestrator step, once at the end of the turn | `decision` (`ANSWER_ONLY` or `PIPELINE`, case-insensitive), `reason` |
-| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes`, `lessons` (findings worth reusing; `[]` when there are none) |
+| `harness_report` | every step that owes a report, once at the end of the turn | `changed_files`, `checks` (`{ command, result }` with `passed` / `failed` / `skipped`), `notes` (`""` when there is nothing), `lessons` (findings worth reusing; `[]` when there are none), and `verdict` for the critic (`PROCEED` / `PROCEED WITH CHANGES` / `BLOCKED`) |
 
 All four fields are required: a report that omits one is incomplete and gets
-the same single repair turn a missing report gets. The `HARNESS-DONE` marker
-cannot be inspected, so it always counts as complete.
+the same single repair turn a missing report gets (`[]` for an empty list, `""`
+for empty notes). The `HARNESS-DONE` marker cannot be inspected, so it always
+counts as complete. A `BLOCKED` verdict from the critic stops the pipeline
+before the file-mutating steps, and the critic report becomes the final answer.
 
 Both are inert outside a running pipeline, and an unusable argument makes the
 call fail instead of being silently ignored. When a tool call and a textual
@@ -381,6 +383,11 @@ until needed.
   work through GitHub: branch → Conventional Commit → push → PR with issue
   linkage and one `type:*` label. Invoke it explicitly with
   `/skill:github-delivery`, or let Pi auto-invoke it when you ask to deliver.
+- **Injected when declared:** an agent's `skills:` list is not decorative. The
+  harness reads each `.agents/skills/<name>/SKILL.md` and injects its content
+  into that step's message, and into the system prompt of any dispatched
+  subagent for that agent. `/harness-config` validation fails when a declared
+  skill file is missing.
 - **Usage:** a skill is a directory with `SKILL.md` (frontmatter `name` +
   `description`). The description decides when the model loads it — state both
   what it does and when it applies.
