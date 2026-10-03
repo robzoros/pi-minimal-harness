@@ -39,8 +39,8 @@ mechanism, and the reference section above tells them to read this file.
 
 - Work is executed through the `pi-minimal-harness` pipeline. A workflow mode
   selects an ordered list of agent steps; the runtime sequences them, so steps
-  cannot be skipped. Modes: `simple`, `full-dry-run`, `full`,
-  `implementation-only`, `delivery-only` (see `defaults.workflow_mode`).
+  cannot be skipped. Modes: `full`, `full-dry-run`, `analysis` (see
+  `defaults.workflow_mode`).
   Each step is sent a pointer to its prompt template plus the values of the
   placeholders, including `{{previous}}`: the previous step's reply, quoted and
   bounded. An agent whose step never ran sees `none (this step has no prior
@@ -53,15 +53,24 @@ mechanism, and the reference section above tells them to read this file.
   supported reasoning effort), `/harness-run <task>`, `/harness-delivery
   [instructions]`, `/harness-auto [on|off]`. `/harness-delivery` runs the
   delivery agent without changing `defaults.workflow_mode`.
-- The orchestrator declares its decision with the `harness_decision` tool, once
-  at the end of its turn: `ANSWER_ONLY` (questions and tasks that change no
-  files — the pipeline stops) or `PIPELINE` (files must change), with a one-line
-  `reason`. Without the tool, the fallback is one marker on the last line:
-  `HARNESS-DECISION: ANSWER_ONLY` or `HARNESS-DECISION: PIPELINE`. The harness
-  moves the decision to the footer; it is not part of the visible answer. With
+- The orchestrator routes the task with the `harness_decision` tool, once at
+  the end of its turn: `ANSWER_ONLY` (a question, an idea, or anything needing
+  conceptual design — the pipeline switches to the `analysis` workflow and the
+  `architect` takes it) or `PIPELINE` (a closed requirements contract, files
+  must change), with a one-line `reason`. Without the tool, the fallback is one
+  marker on the last line: `HARNESS-DECISION: ANSWER_ONLY` or
+  `HARNESS-DECISION: PIPELINE`. The harness moves the decision to the footer;
+  it is not part of the visible answer. With `defaults.analysis_routing: false`
+  an `ANSWER_ONLY` ends the pipeline after the orchestrator instead. With
   `defaults.strict_decision_marker` on, a turn with no usable decision stops the
   pipeline instead of assuming `PIPELINE`.
-- Every non-orchestrator agent writes the report its own prompt template asks
+- The architect converses with the user and keeps the formal requirements in
+  `defaults.requirements_file`. It opens and closes its own multi-turn session
+  with the `harness_session` tool (`START` / `END`; the fallback marker is
+  `HARNESS-SESSION: START` or `HARNESS-SESSION: END` as the last line). While
+  the session is open the user's next plain messages go straight to it, without
+  the orchestrator routing again. It owes no structured report: it converses.
+- Every other agent writes the report its own prompt template asks
   for and calls `harness_report` with `changed_files`, `checks`, `notes` and
   `lessons` (the critic also passes its `verdict`: `PROCEED`,
   `PROCEED WITH CHANGES` or `BLOCKED`). Without the tool, the fallback is

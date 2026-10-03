@@ -51,15 +51,16 @@ const cfgPath = path.join(tmp, "harness.config.yaml");
 let cfgText = await fs.readFile(path.join(ROOT, "harness.config.yaml"), "utf8");
 // Force the flags this test depends on, so it never depends on live config state.
 cfgText = cfgText
-  .replace(/^ {2}workflow_mode: .*$/m, "  workflow_mode: simple")
+  .replace(/^ {2}workflow_mode: .*$/m, "  workflow_mode: full-dry-run")
   .replace(/^ {2}auto_harness: .*$/m, "  auto_harness: true")
-  .replace(/^ {2}question_short_circuit: .*$/m, "  question_short_circuit: true")
+  .replace(/^ {2}analysis_routing: .*$/m, "  analysis_routing: true")
   .replace(/^ {2}allow_dispatch: .*$/m, "  allow_dispatch: true")
   .replace(/^ {2}strict_decision_marker: .*$/m, "  strict_decision_marker: true")
   .replace(/^ {2}preflight_policy: .*$/m, "  preflight_policy: advisory")
   // Keep the smoke test independent of the operator's live model choices.
   .replace(/^ {4}model: .*$/gm, "    model: opencode-go/gpt-5.1")
-  .replace(/(^ {2}orchestrator:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1medium")
+  .replace(/(^  orchestrator:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1medium")
+  .replace(/(^  architect:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1high")
   .replace(/(^ {2}explorer:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1high")
   .replace(/(^ {2}critic:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1medium")
   .replace(/(^ {2}implementer:\n {4}model: .*\n {4}reasoning: ).*$/m, "$1high")
@@ -246,7 +247,7 @@ check("factory registers dispatch tool", !!tools["harness-dispatch"] && typeof t
 // --- helpers -----------------------------------------------------------------
 const lines = cfgText.split(/\r?\n/);
 
-check("getWorkflowSteps(simple)", JSON.stringify(mod.getWorkflowSteps(lines, "simple")) === '["orchestrator","implementer"]');
+check("getWorkflowSteps(analysis)", JSON.stringify(mod.getWorkflowSteps(lines, "analysis")) === '["orchestrator","architect"]');
 check("getWorkflowSteps(full-dry-run)", JSON.stringify(mod.getWorkflowSteps(lines, "full-dry-run")) === '["orchestrator","explorer","critic"]');
 check("getWorkflowSteps(missing) -> null", mod.getWorkflowSteps(lines, "nope") === null);
 check("isAutoHarness true", mod.isAutoHarness(lines) === true);
@@ -255,10 +256,34 @@ check(
   mod.isAutoHarness(mod.setAutoHarness(lines, false)) === false &&
     mod.isAutoHarness(mod.setAutoHarness(mod.setAutoHarness(lines, false), true)) === true,
 );
-check("isQuestionShortCircuit default true", mod.isQuestionShortCircuit(lines.filter((l) => !l.startsWith("  question_short_circuit:"))) === true);
-check("isQuestionShortCircuit false when set", mod.isQuestionShortCircuit(lines.map((l) => (l.startsWith("  question_short_circuit:") ? "  question_short_circuit: false" : l))) === false);
+const withoutAnalysisRouting = (extra) =>
+  lines.map((l) => {
+    if (l.startsWith("  analysis_routing:")) return extra === undefined ? "" : `  analysis_routing: ${extra}`;
+    if (l.startsWith("  question_short_circuit:")) return extra === undefined ? "" : `  question_short_circuit: ${extra}`;
+    return l;
+  });
+check("isAnalysisRouting true from the configured key", mod.isAnalysisRouting(lines) === true);
+check(
+  "isAnalysisRouting false when the key is false",
+  mod.isAnalysisRouting(lines.map((l) => (l.startsWith("  analysis_routing:") ? "  analysis_routing: false" : l))) === false,
+);
+check(
+  "isAnalysisRouting falls back to a legacy question_short_circuit: false",
+  mod.isAnalysisRouting(withoutAnalysisRouting(false)) === false,
+  "the new key wins; without it the old key still decides",
+);
+check(
+  "isAnalysisRouting defaults to true with neither key present",
+  mod.isAnalysisRouting(withoutAnalysisRouting(undefined)) === true,
+);
+check("getRequirementsFile default", mod.getRequirementsFile(lines) === "REQUIREMENTS.md");
+check(
+  "listWorkflows reports the declared modes",
+  JSON.stringify(mod.listWorkflows(lines)) === JSON.stringify(["full-dry-run", "full", "analysis"]),
+  JSON.stringify(mod.listWorkflows(lines)),
+);
 check("isAllowDispatch true", mod.isAllowDispatch(lines) === true);
-check("getDefaultString reads a configured key", mod.getDefaultString(lines, "workflow_mode", "fallback") === "simple");
+check("getDefaultString reads a configured key", mod.getDefaultString(lines, "workflow_mode", "fallback") === "full-dry-run");
 check("getDefaultString fallback", mod.getDefaultString(lines, "no_such_key", "fallback") === "fallback");
 
 // --- contract resolution for dispatched subagents -----------------------------
@@ -464,7 +489,7 @@ check(
 );
 check(
   "validate includes workflow + template checks",
-  checks.some((c) => c.label.includes('workflows has an entry for mode "simple"')) &&
+  checks.some((c) => c.label.includes('workflows has an entry for mode "full-dry-run"')) &&
     checks.some((c) => c.label.includes("prompt_template file exists")),
 );
 const catalogChecks = await mod.validate(lines, cfgPath, tmp, { getAvailable: () => models, getAll: () => [] });
@@ -649,7 +674,7 @@ reset();
 // --- pipeline (explicit command path) ---------------------------------------
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "add a dark mode toggle", waitTurn);
 
-check("pipeline: 2 prompts sent", sent.length === 2, `got ${sent.length}`);
+check("pipeline: 3 prompts sent", sent.length === 3, `got ${sent.length}`);
 check(
   "pipeline: step1 pointer names template, body hidden",
   sent[0]?.includes("prompts/orchestrator.md") &&
@@ -659,13 +684,13 @@ check(
 );
 check(
   "pipeline: step2 pointer names template, body hidden",
-  sent[1]?.includes("prompts/implementer.md") &&
+  sent[1]?.includes("prompts/explorer.md") &&
     sent[1]?.includes("add a dark mode toggle") &&
-    !sent[1]?.includes("# Implementer"),
+    !sent[1]?.includes("# Explorer"),
   String(sent[1]).slice(0, 90),
 );
 
-const implMatch = /^ {4}model:\s*(\S+)/m.exec(cfgText.slice(cfgText.indexOf("  implementer:")));
+const implMatch = /^ {4}model:\s*(\S+)/m.exec(cfgText.slice(cfgText.indexOf("  explorer:")));
 const implModel = implMatch ? mod.findModelRef(implMatch[1], { getAvailable: () => models, getAll: () => [] }) : undefined;
 const expectedImpl = implModel ? `${implModel.provider}/${implModel.id}` : null;
 check(
@@ -681,16 +706,20 @@ check(
 );
 check("pipeline: thinking restored to original", thinkingCalls.at(-1) === "high", JSON.stringify(thinkingCalls));
 check(
-  "pipeline: step1 shows no invented total, step2 shows 2/2",
-  statuses.includes("harness: simple · orchestrator · auto: on") &&
-    statuses.includes("harness: simple · 2/2 implementer · decision: pipeline · auto: on"),
+  "pipeline: step1 shows no invented total, step2 shows 2/3",
+  statuses.includes("harness: full-dry-run · orchestrator · auto: on") &&
+    statuses.includes("harness: full-dry-run · 2/3 explorer · decision: pipeline · auto: on"),
   statuses.join(" | "),
 );
-check("pipeline: footer ends at mode + decision + auto", statuses.at(-1) === "harness: simple · decision: pipeline · auto: on", String(statuses.at(-1)));
-check("pipeline: finished info (report present, no repair)", notifies.some((n) => n.includes('Pipeline "simple" finished: orchestrator -> implementer')), notifies.join(" | "));
+check("pipeline: footer ends at mode + decision + auto", statuses.at(-1) === "harness: full-dry-run · decision: pipeline · auto: on", String(statuses.at(-1)));
+check(
+  "pipeline: finished info (report present, no repair)",
+  notifies.some((n) => n.includes('Pipeline "full-dry-run" finished: orchestrator -> explorer -> critic')),
+  notifies.join(" | "),
+);
 
 reset();
-const implementerReasoningBlock = /(^  implementer:\n    model: )opencode-go\/gpt-5\.1(\n    reasoning: )high/m;
+const implementerReasoningBlock = /(^  explorer:\n    model: )opencode-go\/gpt-5\.1(\n    reasoning: )high/m;
 const cfgUnsupportedEffort = cfgText.replace(
   implementerReasoningBlock,
   "$1opencode-go/deepseek-v4.1-flash$2high",
@@ -699,7 +728,7 @@ await fs.writeFile(cfgPath, cfgUnsupportedEffort);
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "unsupported effort", waitTurn);
 check(
   "pipeline: unsupported model effort warns and is not applied",
-  JSON.stringify(thinkingCalls) === JSON.stringify(["medium", "high"]) &&
+  JSON.stringify(thinkingCalls) === JSON.stringify(["medium", "medium", "high"]) &&
     notifies.some((n) => n.includes('effort "high" is not supported') && n.includes("available: off")),
   JSON.stringify({ thinkingCalls, notifies }),
 );
@@ -712,70 +741,76 @@ reset();
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "off effort", waitTurn);
 check(
   "pipeline: off effort still restores original thinking level",
-  JSON.stringify(thinkingCalls) === JSON.stringify(["medium", "high"]),
+  JSON.stringify(thinkingCalls) === JSON.stringify(["medium", "medium", "high"]),
   JSON.stringify(thinkingCalls),
 );
 await fs.writeFile(cfgPath, cfgText);
 
 // --- footer refresh: session_start + /harness-auto toggle --------------------
 await events["session_start"]({}, makeCtx(tmp, false));
-check("session_start: footer shows mode + auto", statuses.at(-1) === "harness: simple · auto: on", String(statuses.at(-1)));
+check("session_start: footer shows mode + auto", statuses.at(-1) === "harness: full-dry-run · auto: on", String(statuses.at(-1)));
 check("session_start: decision segment cleared", !String(statuses.at(-1)).includes("decision:"));
 
 await commands["harness-auto"].handler("off", makeCtx(tmp, true));
-check("/harness-auto off: footer refreshed", statuses.at(-1) === "harness: simple · auto: off", String(statuses.at(-1)));
+check("/harness-auto off: footer refreshed", statuses.at(-1) === "harness: full-dry-run · auto: off", String(statuses.at(-1)));
 await commands["harness-auto"].handler("on", makeCtx(tmp, true));
-check("/harness-auto on: footer refreshed", statuses.at(-1) === "harness: simple · auto: on", String(statuses.at(-1)));
+check("/harness-auto on: footer refreshed", statuses.at(-1) === "harness: full-dry-run · auto: on", String(statuses.at(-1)));
 
-// --- question short-circuit: state path (message_end strips the marker) ------
+// --- routing to the architect: state path (message_end strips the marker) -----
 reset();
-assistantTextOverride = "Direct answer to the question.\n\nHARNESS-DECISION: ANSWER_ONLY";
+assistantTextOverride = "This needs design.\n\nHARNESS-DECISION: ANSWER_ONLY";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "¿cómo funciona el harness?", waitTurn);
-check("short-circuit: ANSWER_ONLY stops after orchestrator", sent.length === 1, `got ${sent.length}`);
-check("short-circuit: reports direct answer", notifies.some((n) => n.includes("orchestrator answered directly")), notifies.join(" | "));
-check("short-circuit: no stopped-pipeline warning", !notifies.some((n) => n.startsWith("[warning]") && n.includes("stopped")), notifies.join(" | "));
+check("routing: ANSWER_ONLY hands the turn to the architect", sent.length === 2, `got ${sent.length}`);
+check("routing: step2 is the architect", sent[1]?.includes("prompts/architecture.md"), String(sent[1]).slice(0, 80));
+check(
+  "routing: it does not fall through to the explorer's steps",
+  !sent[1]?.includes("prompts/explorer.md") && !sent[1]?.includes("prompts/critic.md"),
+  String(sent[1]).slice(0, 80),
+);
+check("routing: announces the mode it switched to", notifies.some((n) => n.includes('Routed to "analysis"')), notifies.join(" | "));
+check("routing: no stopped-pipeline warning", !notifies.some((n) => n.startsWith("[warning]") && n.includes("stopped")), notifies.join(" | "));
 
 const lastAssistant = [...branchArr].reverse().find((e) => e.type === "message" && e.message.role === "assistant");
 check("decision stripped from the visible reply", !JSON.stringify(lastAssistant).includes("HARNESS-DECISION"));
 check("footer shows the recorded decision", statuses.some((s) => String(s).includes("decision: answer_only")), statuses.slice(-3).join(" | "));
 check(
-  "question run ends at 1/1 orchestrator",
-  statuses.at(-1) === "harness: simple · 1/1 orchestrator · decision: answer_only · auto: on",
-  String(statuses.at(-1)),
+  "routed run shows the architect as the last step",
+  statuses.includes("harness: full-dry-run · 2/2 architect · decision: answer_only · auto: on"),
+  statuses.join(" | "),
 );
 
 reset();
 assistantTextOverride = "Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "implementa la feature", waitTurn);
-check("short-circuit: PIPELINE runs all steps", sent.length === 2, `got ${sent.length}`);
+check("routing: PIPELINE runs the configured steps", sent.length === 3, `got ${sent.length}`);
 check(
-  "pipeline run shows 1/2 orchestrator once decided",
-  statuses.includes("harness: simple · 1/2 orchestrator · decision: pipeline · auto: on"),
+  "pipeline run shows 1/3 orchestrator once decided",
+  statuses.includes("harness: full-dry-run · 1/3 orchestrator · decision: pipeline · auto: on"),
   statuses.join(" | "),
 );
 
-// flag disabled -> ANSWER_ONLY does not stop the pipeline
+// routing off -> ANSWER_ONLY ends the pipeline after the orchestrator
 const cfgTextShort = await fs.readFile(cfgPath, "utf8");
-await fs.writeFile(cfgPath, cfgTextShort.replace("  question_short_circuit: true", "  question_short_circuit: false"));
+await fs.writeFile(cfgPath, cfgTextShort.replace("  analysis_routing: true", "  analysis_routing: false"));
 reset();
 assistantTextOverride = "Direct answer.\n\nHARNESS-DONE\n\nHARNESS-DECISION: ANSWER_ONLY";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "¿otra pregunta?", waitTurn);
-check("short-circuit: disabled flag runs all steps", sent.length === 2, `got ${sent.length}`);
+check("routing: disabled key ends the pipeline after the orchestrator", sent.length === 1, `got ${sent.length}`);
+check(
+  "routing: disabled reports the direct answer",
+  notifies.some((n) => n.includes("orchestrator answered directly")),
+  notifies.join(" | "),
+);
 await fs.writeFile(cfgPath, cfgTextShort);
 assistantTextOverride = null;
 
-// --- short-circuit: text fallback (no message_end handler) -------------------
+// --- routing: text fallback (no message_end handler) -------------------------
 const savedMessageEnd = events["message_end"];
 delete events["message_end"];
 reset();
-assistantTextOverride = "Direct answer.\n\nHARNESS-DECISION: ANSWER_ONLY";
+assistantTextOverride = "Needs design.\n\nHARNESS-DECISION: ANSWER_ONLY";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "¿fallback?", waitTurn);
-check("short-circuit: text fallback works without message_end", sent.length === 1, `got ${sent.length}`);
-check(
-  "fallback run ends at 1/1 orchestrator (finally path)",
-  statuses.at(-1) === "harness: simple · 1/1 orchestrator · auto: on",
-  String(statuses.at(-1)),
-);
+check("routing: text fallback routes without message_end", sent.length === 2 && sent[1]?.includes("prompts/architecture.md"), `got ${sent.length}`);
 events["message_end"] = savedMessageEnd;
 assistantTextOverride = null;
 
@@ -783,16 +818,16 @@ assistantTextOverride = null;
 // Case 1: final step carries HARNESS-DONE -> no repair turn.
 reset();
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "task one", waitTurn);
-check("report: marker present -> no repair turn", sent.length === 2, `got ${sent.length}`);
+check("report: marker present -> no repair turn", sent.length === 3, `got ${sent.length}`);
 check("report: finished as info", notifies.some((n) => n.startsWith("[info]") && n.includes("finished:")), notifies.join(" | "));
 
 // Case 2: final step omits it -> exactly one repair turn, then compliance.
 reset();
 assistantScript.push("orchestrator output\n\nHARNESS-DECISION: PIPELINE");
-assistantScript.push("implementer output sin marca");
+assistantScript.push("explorer output sin marca");
 assistantScript.push("### Changes\n- none\n\n### Evidence\n- test\n\n### Notes for delivery\n- none\n\nHARNESS-DONE");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "task two", waitTurn);
-check("report: missing marker -> exactly one repair turn", sent.length === 3, `got ${sent.length}`);
+check("report: missing marker -> exactly one repair turn", sent.length === 4, `got ${sent.length}`);
 check("report: repair prompt demands HARNESS-DONE", sent[2]?.includes("HARNESS-DONE"), String(sent[2]).slice(0, 60));
 check(
   "report: repaired -> finish info, no missing-report warning",
@@ -800,24 +835,27 @@ check(
   notifies.join(" | "),
 );
 
-// Case 3: repair also omits it -> warning, still only one repair turn.
+// Case 3: the LAST step repairs and still omits it -> warning, one repair turn.
+// The failing step has to be the last one, or the pipeline stops early and
+// never reaches the completion warning this case is about.
 reset();
 assistantScript.push("orchestrator output\n\nHARNESS-DECISION: PIPELINE");
-assistantScript.push("implementer sin marca");
+assistantScript.push("explorer output\n\nHARNESS-DONE");
+assistantScript.push("critic sin marca");
 assistantScript.push("reparación sin marca");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "task three", waitTurn);
 check("report: repair fails -> warning", notifies.some((n) => n.startsWith("[warning]") && n.includes("report is missing")), notifies.join(" | "));
-check("report: still only one repair turn", sent.length === 3, `got ${sent.length}`);
+check("report: still only one repair turn", sent.length === 4, `got ${sent.length}`);
 check(
   "report: repair failure names the step and stops the pipeline",
-  notifies.some((n) => n.includes("did not report") && n.includes("implementer")),
+  notifies.some((n) => n.includes("did not report") && n.includes("critic")),
   notifies.join(" | "),
 );
 
 // Decision segment clears again on session_start.
 statuses.length = 0;
 await events["session_start"]({}, makeCtx(tmp, false));
-check("session_start after run: footer has no decision", statuses.at(-1) === "harness: simple · auto: on", String(statuses.at(-1)));
+check("session_start after run: footer has no decision", statuses.at(-1) === "harness: full-dry-run · auto: on", String(statuses.at(-1)));
 
 // --- dispatch seams ----------------------------------------------------------
 const argvFull = mod.buildDispatchArgs({ systemPromptPath: "/tmp/s.md", model: "p/m", thinking: "high", brief: "do it" });
@@ -908,8 +946,12 @@ check("dispatch: empty brief rejects", rEmpty.rejected && rEmpty.text.toLowerCas
 const rNoTasks = await rejected({ tasks: [] });
 check("dispatch: empty task list rejects", rNoTasks.rejected && rNoTasks.text.includes("between 1 and"), rNoTasks.text);
 
-const cfgUnsupported = cfgOriginal
-  .replace("    model: opencode-go/gpt-5.1\n    reasoning: high", "    model: opencode-go/deepseek-v4.1-flash\n    reasoning: high");
+// Anchored on the agent block: a plain first-match replace would land on
+// whichever agent declares `high` first, not the one being dispatched.
+const cfgUnsupported = cfgOriginal.replace(
+  /(^  explorer:\n    model: )opencode-go\/gpt-5\.1(\n    reasoning: )high/m,
+  "$1opencode-go/deepseek-v4.1-flash$2high",
+);
 await fs.writeFile(cfgPath, cfgUnsupported);
 const rUnsupported = await rejected({ tasks: [{ agent: "explorer", brief: "x" }] });
 check(
@@ -960,7 +1002,7 @@ const started = await events["input"]({ text: "create onboarding scene templates
 check("input: plain request handled", started.action === "handled");
 
 await new Promise((r) => setTimeout(r, 3500));
-check("input: pipeline ran detached (2 prompts)", sent.length === 2, `got ${sent.length}`);
+check("input: pipeline ran detached (3 prompts)", sent.length === 3, `got ${sent.length}`);
 check("input: task reached orchestrator", sent[0]?.includes("create onboarding scene templates"));
 
 // auto OFF -> passthrough
@@ -993,14 +1035,16 @@ await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
 check("strict: ambiguous decision stops the pipeline", sent.length === 1, `got ${sent.length}`);
 
 reset();
-assistantTextOverride = 'If it had written "HARNESS-DECISION: ANSWER_ONLY" I would stop, but it did not.';
+// The marker is quoted but NOT on the last line, which is the only place a
+// marker counts. Written on one line it would decide, quote or not.
+assistantTextOverride = 'If it had written "HARNESS-DECISION: ANSWER_ONLY" I would stop.\nBut the last line is prose.';
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
-check("strict: a quoted marker does not decide", sent.length === 1, `got ${sent.length}`);
+check("strict: a quoted marker off the last line does not decide", sent.length === 1, `got ${sent.length}`);
 
 await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: false }));
 reset();
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "pregunta", waitTurn);
-check("strict: disabled keeps the previous fail-open behaviour", sent.length === 2, `got ${sent.length}`);
+check("strict: disabled keeps the previous fail-open behaviour", sent.length === 3, `got ${sent.length}`);
 
 // P0-3: an intermediate step owes its report too.
 await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory" }));
@@ -1035,7 +1079,7 @@ const gateRepo = path.join(tmp, "gate-repo");
 let gateReady = false;
 try {
   execFileSync("git", ["init", "-q", gateRepo], { stdio: "ignore" });
-  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "blocking" }));
+  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "blocking", workflow_mode: "full" }));
   await fs.cp(path.join(ROOT, "prompts"), path.join(gateRepo, "prompts"), { recursive: true });
   await fs.writeFile(path.join(gateRepo, "uncommitted.txt"), "work in progress\n");
   gateReady = true;
@@ -1044,12 +1088,20 @@ try {
 }
 
 if (gateReady) {
+  // `full`, not the default mode: the blocking gate only guards a step that
+  // declares `mutates_files`, and no step in the other modes does.
   reset();
-  assistantTextOverride = "Plan.\n\nHARNESS-DECISION: PIPELINE";
+  // Every step before the gate has to report, or the pipeline stops on the
+  // report guarantee long before it reaches the mutating step the gate guards.
+  assistantScript.push(
+    "Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE",
+    "Explored.\n\nHARNESS-DONE",
+    "Reviewed.\n\nHARNESS-DONE",
+  );
   const noUiGate = makeCtx(gateRepo, true);
   noUiGate.hasUI = false;
   await mod.runPipeline(fakePi, noUiGate, "tarea", waitTurn);
-  check("preflight: blocking stops the file-mutating step", sent.length === 1, `got ${sent.length}`);
+  check("preflight: blocking stops the file-mutating step", sent.length === 3, `got ${sent.length}`);
   check(
     "preflight: without a TUI the block is an error, never a silent pass",
     notifies.some((n) => n.startsWith("[error]") && n.includes('Pipeline blocked before "implementer"')),
@@ -1070,7 +1122,7 @@ if (gateReady) {
     `confirms=${confirms} prompts=${sent.length}`,
   );
 
-  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "advisory" }));
+  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "advisory", workflow_mode: "full" }));
   reset();
   const advisoryGate = makeCtx(gateRepo, true);
   advisoryGate.ui.confirm = async () => {
@@ -1080,8 +1132,27 @@ if (gateReady) {
   await mod.runPipeline(fakePi, advisoryGate, "tarea", waitTurn);
   check(
     "preflight: advisory only warns and never asks",
-    sent.length === 2 && confirms === 1 && notifies.some((n) => n.includes("uncommitted changes")),
+    sent.length === 5 && confirms === 1 && notifies.some((n) => n.includes("uncommitted changes")),
     `prompts=${sent.length} confirms=${confirms} ${notifies.join(" | ")}`,
+  );
+
+  // A dirty tree is the normal state while a design is open, and each turn of a
+  // design session is its own pipeline: gating the architect would ask on every
+  // message of a conversation.
+  await fs.writeFile(path.join(gateRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "blocking", workflow_mode: "analysis" }));
+  reset();
+  assistantScript.push("Needs design.\n\nHARNESS-DECISION: ANSWER_ONLY", "Here is the proposal.");
+  let architectConfirms = 0;
+  const architectGate = makeCtx(gateRepo, true);
+  architectGate.ui.confirm = async () => {
+    architectConfirms++;
+    return true;
+  };
+  await mod.runPipeline(fakePi, architectGate, "idea", waitTurn);
+  check(
+    "preflight: the architect is exempt from the blocking gate",
+    architectConfirms === 0 && sent.length === 2 && sent[1]?.includes("prompts/architecture.md"),
+    `confirms=${architectConfirms} prompts=${sent.length}`,
   );
 } else {
   console.log("SKIP preflight gate tests: git is unavailable in this environment");
@@ -1121,7 +1192,7 @@ const cfgControl = await fs.readFile(cfgPath, "utf8");
 reset();
 pendingToolCall = { name: "harness_decision", params: { decision: "pipeline", reason: "files must change" } };
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "cambiar algo", waitTurn);
-check("tool: a decision call runs the whole pipeline", sent.length === 2, `got ${sent.length}`);
+check("tool: a decision call runs the whole pipeline", sent.length === 3, `got ${sent.length}`);
 check("tool: no repair turn when the decision came from the tool", !sent.some((s) => s.includes("no usable decision")), sent.length + "");
 check(
   "tool: the reason is surfaced for the operator",
@@ -1130,29 +1201,37 @@ check(
 );
 check("tool: sloppy casing is accepted", toolErrors.length === 0, toolErrors.join(" | "));
 
-// ANSWER_ONLY through the tool short-circuits exactly like the marker.
+// ANSWER_ONLY through the tool routes to the architect, like the marker does.
 reset();
 pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" } };
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "una pregunta", waitTurn);
-check("tool: ANSWER_ONLY short-circuits after step 1", sent.length === 1, `got ${sent.length}`);
+check("tool: ANSWER_ONLY routes to the architect", sent.length === 2 && sent[1]?.includes("prompts/architecture.md"), `got ${sent.length}`);
 check(
-  "tool: short-circuit footer shows 1/1 with the decision",
-  statuses.at(-1)?.includes("1/1 orchestrator") && statuses.at(-1)?.includes("decision: answer_only"),
-  String(statuses.at(-1)),
+  "tool: the routed footer names the architect and the decision",
+  statuses.some((s) => String(s).includes("architect") && String(s).includes("decision: answer_only")),
+  statuses.slice(-3).join(" | "),
 );
+
+// With routing off, the same decision ends the pipeline after the orchestrator.
+reset();
+await fs.writeFile(cfgPath, cfgControl.replace("  analysis_routing: true", "  analysis_routing: false"));
+pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" } };
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "una pregunta", waitTurn);
+check("tool: with routing off ANSWER_ONLY ends the pipeline", sent.length === 1, `got ${sent.length}`);
+await fs.writeFile(cfgPath, cfgControl);
 
 // The tool wins over a contradicting marker, thanks to the runtime ordering:
 // message_end (which reads the marker) runs BEFORE the tool executes.
 reset();
 pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" }, text: "Done.\n\nHARNESS-DECISION: PIPELINE" };
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "contradicción", waitTurn);
-check("tool: the tool beats a contradicting marker in the same message", sent.length === 1, `got ${sent.length}`);
+check("tool: the tool beats a contradicting marker in the same message", sent.length === 2 && sent[1]?.includes("prompts/architecture.md"), `got ${sent.length}`);
 
 // Lowercase decision must not stop the pipeline (the enum trap the critic flagged).
 reset();
 pendingToolCall = { name: "harness_decision", params: { decision: "answer_only" }, text: "Done.\n\nHARNESS-DECISION: PIPELINE" };
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "contradicción invertida", waitTurn);
-check("tool: lowercase decision is normalized, not rejected", sent.length === 1 && toolErrors.length === 0, `sent=${sent.length} ${toolErrors.join("|")}`);
+check("tool: lowercase decision is normalized, not rejected", sent.length === 2 && toolErrors.length === 0, `sent=${sent.length} ${toolErrors.join("|")}`);
 
 // A report call satisfies the per-step guarantee with no HARNESS-DONE at all.
 reset();
@@ -1174,7 +1253,7 @@ pendingToolCall = {
   },
 };
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea con report", waitTurn);
-check("report tool: a harness_report call satisfies the step with no marker", sent.length === 2, `got ${sent.length}`);
+check("report tool: a harness_report call satisfies the step with no marker", sent.length === 3, `got ${sent.length}`);
 check(
   "report tool: no repair turn and no missing-report warning",
   !notifies.some((n) => n.includes("did not report")) && !notifies.some((n) => n.includes("report is missing")),
@@ -1184,12 +1263,12 @@ check(
 // --- exploration and memory are reachable in the default mode ---------------
 
 const cfgLines = (await fs.readFile(cfgPath, "utf8")).split("\n");
-const simpleSteps = mod.getWorkflowSteps(cfgLines, "simple") ?? [];
+const simpleSteps = mod.getWorkflowSteps(cfgLines, "full") ?? [];
 const implementerTools = mod.getAgentTools(cfgLines, "implementer");
 check(
   "config: the implementer of the default mode is granted codegraph",
   simpleSteps.includes("implementer") && implementerTools.includes("codegraph"),
-  `simple=${simpleSteps.join("->")} tools=${implementerTools.join(",")}`,
+  `full=${simpleSteps.join("->")} tools=${implementerTools.join(",")}`,
 );
 check(
   "config: the orchestrator, which runs in every mode, is granted codegraph too",
@@ -1230,7 +1309,7 @@ check(
 const exampleLines = (await fs.readFile(path.join(ROOT, "harness.config.example.yaml"), "utf8")).split("\n");
 check(
   "config: the shipped example grants codegraph to the implementer of the default mode too",
-  (mod.getWorkflowSteps(exampleLines, "simple") ?? []).includes("implementer") &&
+  (mod.getWorkflowSteps(exampleLines, "full") ?? []).includes("implementer") &&
     mod.getAgentTools(exampleLines, "implementer").includes("codegraph") &&
     mod.getAgentTools(exampleLines, "orchestrator").includes("codegraph"),
   mod.getAgentTools(exampleLines, "implementer").join(","),
@@ -1240,7 +1319,7 @@ check(
 // and the memory write have to survive rendering, not just live in the file.
 const implementerPrompt = mod.renderPrompt(
   await fs.readFile(path.join(ROOT, "prompts", "implementer.md"), "utf8"),
-  { task: "tarea", mode: "simple", agent: "implementer", step: "2", steps: "2", previous: "" },
+  { task: "tarea", mode: "full", agent: "implementer", step: "4", steps: "5", previous: "" },
 );
 check(
   "prompt: the implementer is told to check dependents before editing a shared symbol",
@@ -1343,11 +1422,11 @@ const withoutLessons = waitTurnInjecting([
   { after: 2, call: { name: "harness_report", params: { ...completeReport, changed_files: ["a.ts"] } } },
 ]);
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "reporte sin lessons", withoutLessons);
-check("lessons: a report missing lessons earns exactly one repair turn", sent.length === 3, `got ${sent.length}`);
+check("lessons: a report missing lessons earns exactly one repair turn", sent.length === 4, `got ${sent.length}`);
 check("lessons: the repair prompt names the missing field", sent[2]?.includes("lessons"), String(sent[2]).slice(0, 200));
 check(
   "lessons: the completed repair finishes the pipeline",
-  notifies.some((n) => n.includes("finished: orchestrator -> implementer")) && !notifies.some((n) => n.includes("did not report")),
+  notifies.some((n) => n.includes("finished: orchestrator -> explorer -> critic")) && !notifies.some((n) => n.includes("did not report")),
   notifies.join(" | "),
 );
 
@@ -1507,10 +1586,98 @@ const staleReport = waitTurnInjecting([
 assistantScript.push("### Changes\n- a.ts");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "informe del orquestador", staleReport);
 check(
-  "report: a stale report from the orchestrator does not satisfy the implementer",
-  sent.length === 3,
+  "report: a stale report from the orchestrator does not satisfy the last step",
+  sent.length === 4,
   `got ${sent.length}`,
 );
+
+// --- the architect session --------------------------------------------------
+// Placed last: `inArchitectSession` is module state for the whole process, and
+// the block ends by closing the session again. Auto-harness was switched off
+// earlier in this file, and the normal path needs it.
+await fs.writeFile(cfgPath, (await fs.readFile(cfgPath, "utf8")).replace(/^ {2}auto_harness: .*$/m, "  auto_harness: true"));
+reset();
+const armSession = waitTurnInjecting([
+  { after: 0, call: { name: "harness_decision", params: { decision: "answer_only" } } },
+  { after: 1, call: { name: "harness_session", params: { active: "START" } } },
+]);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "diseñemos la API", armSession);
+check("session: the architect arms the session", notifies.some((n) => n.includes("Architect session open")), notifies.join(" | "));
+
+reset();
+sent.length = 0;
+await events["input"]({ text: "y si fuera multi-idioma?", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 1500));
+check(
+  "session: the next plain input goes straight to the architect",
+  sent.length === 1 && sent[0]?.includes("prompts/architecture.md"),
+  `sent=${sent.length} ${String(sent[0]).slice(0, 70)}`,
+);
+check("session: the orchestrator is skipped while it is open", !sent[0]?.includes("prompts/orchestrator.md"));
+
+// A slash command must still reach its own command, not the architect.
+reset();
+sent.length = 0;
+const slash = await events["input"]({ text: "/harness-mode", source: "interactive" }, makeCtx(tmp, false));
+check("session: a slash command is not swallowed by the session", slash.action === "continue" && sent.length === 0);
+
+reset();
+const closeSession = waitTurnInjecting([{ after: 0, call: { name: "harness_session", params: { active: "END" } } }]);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "cerramos el diseño", closeSession, "analysis", "architect");
+check("session: the architect closes it", notifies.some((n) => n.includes("Architect session closed")), notifies.join(" | "));
+
+reset();
+sent.length = 0;
+await events["input"]({ text: "otra pregunta", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 1500));
+check("session: after END the orchestrator routes again", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
+
+// The architect converses, so it owes no structured report.
+reset();
+assistantScript.push("This needs design.\n\nHARNESS-DECISION: ANSWER_ONLY");
+assistantScript.push("Here is the proposal.");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "idea suelta", waitTurn);
+check(
+  "architect: a chat reply with no report earns no repair turn",
+  sent.length === 2 && !sent.some((s) => s.includes("did not report") || s.includes("HARNESS-DONE")),
+  `sent=${sent.length}`,
+);
+
+// The marker fallback, for prompts that have not migrated to the tool.
+reset();
+assistantScript.push("Needs design.\n\nHARNESS-DECISION: ANSWER_ONLY");
+assistantScript.push("Opening the session.\n\nHARNESS-SESSION: START");
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "volvamos a esto", waitTurn);
+check("session: the textual fallback arms the session too", notifies.some((n) => n.includes("Architect session open")), notifies.join(" | "));
+const lastWithSession = JSON.stringify([...branchArr].reverse().find((e) => e.type === "message" && e.message.role === "assistant"));
+check("session: the marker is stripped from the visible reply", !lastWithSession.includes("HARNESS-SESSION"));
+
+reset();
+sent.length = 0;
+await events["input"]({ text: "seguimos", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 1500));
+check("session: the fallback really routed to the architect", sent[0]?.includes("prompts/architecture.md"), String(sent[0]).slice(0, 70));
+
+// Leave no session armed for anything that runs after this block.
+reset();
+const closeAgain = waitTurnInjecting([{ after: 0, call: { name: "harness_session", params: { active: "END" } } }]);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "fin", closeAgain, "analysis", "architect");
+reset();
+sent.length = 0;
+await events["input"]({ text: "comprobación", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 1500));
+check("session: no session is left armed", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
+
+// The session tool rejects anything that is not START or END. It throws on
+// purpose: the runtime marks a thrown tool as an error, while an `isError`
+// field on a returned result is ignored.
+let sessionToolError = "";
+try {
+  await tools["harness_session"].execute("call-x", { active: "MAYBE" }, {});
+} catch (error) {
+  sessionToolError = error instanceof Error ? error.message : String(error);
+}
+check("session: the tool rejects an unknown value", /START.*END/.test(sessionToolError), sessionToolError);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

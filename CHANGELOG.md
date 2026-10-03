@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An `architect` agent, and the `analysis` workflow that runs it.** The
+  conceptual phase is now an agent of its own: it talks to the user in chat,
+  sizes the work against the repository with CodeGraph, records what is worth
+  reusing with Engram, and maintains the formal requirements of the work. It
+  appears in `workflows.analysis` as `orchestrator -> architect`, granted
+  `filesystem`, `engram` and `codegraph`.
+- **The architect owns a multi-turn session.** It opens and closes it with the
+  new `harness_session` control tool (`START` / `END`, falling back to a
+  `HARNESS-SESSION: START` / `HARNESS-SESSION: END` last line), and while the
+  session is open the user's next plain messages go straight to it instead of
+  through the orchestrator. **The router never arms it**: the first architect
+  turn is a single turn, so an ordinary question cannot leave the user trapped
+  in a design session.
+- **The orchestrator is now a router.** `ANSWER_ONLY` no longer ends the
+  pipeline — it routes the turn to the `analysis` workflow, and the user keeps
+  talking to the architect. `PIPELINE` is for a closed requirements contract
+  and runs the configured mode. `defaults.analysis_routing: false` restores the
+  old behaviour, in which an `ANSWER_ONLY` ends the pipeline after the
+  orchestrator.
+- **`init` and `update` create `REQUIREMENTS.md`** at the project root when it
+  is missing, and never touch an existing one — it is project-owned, like the
+  changelog, and deliberately outside the harness-owned set that `update`
+  replaces. `defaults.requirements_file` chooses the name.
 - Exploration and memory are now reachable in every workflow mode instead of
   only in `full`. `codegraph` is granted to the `implementer` and to the
   `orchestrator` (which runs in every mode), not only to the `explorer` that
@@ -88,6 +111,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking: five workflow modes are now three.** `simple`,
+  `implementation-only` and `delivery-only` are gone; what is left is `full`
+  (the technical flow through GitHub delivery), `full-dry-run` (explore,
+  critique and simulate implementation without mutating files) and `analysis`
+  (the interactive `orchestrator -> architect`). `update` **migrates** a
+  `defaults.workflow_mode` naming a retired mode to `full` and reports it: the
+  config merge is additive and never overwrites a local scalar, so without that
+  an existing installation would have kept a mode with no steps and auto-harness
+  would have stopped working with nothing the user could act on.
+  `/harness-delivery` no longer depends on a retired mode: it runs the delivery
+  agent through `full`.
+- **Breaking: `architect` is a required agent.** The additive config merge
+  inserts the whole missing block, so `update` installs it into existing
+  projects; validation names the fix when it is absent.
+- `defaults.analysis_routing` replaces `defaults.question_short_circuit`.
+  Overloading the old key would have been a silent break: an adopter who set it
+  to `false` to let a pipeline run without a decision would have lost routing
+  too. The old key is still read when the new one is absent, so that
+  configuration survives the upgrade unchanged.
+- The architect is exempt from the per-step report guarantee and from the
+  blocking repository preflight. A structured report owed on every chat turn is
+  the opposite of a chat, and a dirty tree is the normal state while a design
+  is still open — with each turn its own pipeline, the gate would have asked on
+  every message.
+- The driver clears `lastDecision` and `lastReport` before every step instead
+  of only after the first. A second step used to read the first step's decision
+  as its own, which only went unnoticed because the report guarantee skipped it.
+  The footer keeps showing the decision through a separate, run-level variable.
+- Validation warns about workflow entries that are not modes this harness
+  offers, which is what an upgrade leaves behind: `update` only ever adds.
 - The delivery contract asks before creating what it is missing, instead of
   stopping on it. When the repository requires issue-linked pull requests and
   the handoff carries no issue, the delivery step asked the user to authorize

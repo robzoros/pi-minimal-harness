@@ -1,11 +1,17 @@
 project: my-project
 
 defaults:
-  workflow_mode: simple
+  workflow_mode: full
   auto_harness: true
-  question_short_circuit: true
   allow_dispatch: true
-  allow_simple_mode: true
+  # A question, an idea or anything needing conceptual design routes to the
+  # `analysis` workflow (orchestrator -> architect) instead of ending after the
+  # orchestrator. Set to false to make ANSWER_ONLY end the pipeline there.
+  analysis_routing: true
+  # Where the architect keeps the formal requirements of the work in design.
+  # Project-owned: `init`/`update` create it when missing and never overwrite
+  # it. `.agents/REQUIREMENTS.md` is the documented alternative.
+  requirements_file: REQUIREMENTS.md
   # A missing or ambiguous decision marker stops the pipeline instead of being
   # read as "not ANSWER_ONLY", which would run the mutating steps of a task
   # that may only need an answer. Set to false to keep guessing.
@@ -32,20 +38,28 @@ workflows:
       - critic
       - implementer
       - delivery
-  simple:
+  analysis:
     steps:
       - orchestrator
-      - implementer
-  implementation-only:
-    steps:
-      - orchestrator
-      - implementer
-  delivery-only:
-    steps:
-      - orchestrator
-      - delivery
+      - architect
 
 agents:
+  architect:
+    model: provider/model-id
+    reasoning: high
+    mutates_files: true
+    tools:
+      - filesystem
+      - engram
+      # The architect sizes the work with CodeGraph while discussing it; remove
+      # the line when CodeGraph is not installed.
+      - codegraph
+    prompt_template: prompts/architecture.md
+    responsibilities:
+      - discuss_with_the_user
+      - analyse_the_repository
+      - maintain_the_requirements_file
+      - record_findings_with_engram
   orchestrator:
     model: provider/model-id
     reasoning: medium
@@ -101,8 +115,9 @@ agents:
       - shell
       - tests
       - engram
-      # `simple` and `implementation-only` never run the explorer, so the only
-      # step that edits files needs the impact check itself.
+      # `full-dry-run` and `analysis` never run the implementer, so when one of
+      # them is the active mode this is the only step that edits files, and the
+      # impact check belongs here.
       - codegraph
     prompt_template: prompts/implementer.md
     responsibilities:

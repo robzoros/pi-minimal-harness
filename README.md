@@ -32,9 +32,9 @@ workflow you can actually audit.
 
 | Piece | What it does |
 |---|---|
-| Workflow modes | `simple`, `full-dry-run`, `full`, `implementation-only`, `delivery-only` — ordered agent steps from one YAML |
+| Workflow modes | `full`, `full-dry-run`, `analysis` — ordered agent steps from one YAML |
 | Pipeline driver | Steps run in order as separate turns: model + supported reasoning effort + prompt template switched per step |
-| Question short-circuit | Questions end at the orchestrator (`HARNESS-DECISION: ANSWER_ONLY`); the rest never runs |
+| Router | The orchestrator sends a question or an idea to the `analysis` workflow (`orchestrator -> architect`), and a closed requirements contract down `full` |
 | Report guarantee | Every step that owes a report calls `harness_report` with all its fields (fallback: ends with `HARNESS-DONE`); an incomplete report earns one repair turn per step, and the pipeline stops if it is still incomplete |
 | Control tools | `harness_decision` and `harness_report` replace the textual markers as the primary signal; the markers stay as a one-release fallback |
 | Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-delivery`, `/harness-auto` |
@@ -290,9 +290,10 @@ formatting when it edits):
 ```yaml
 project: my-project
 defaults:
-  workflow_mode: simple          # simple | full-dry-run | full | implementation-only | delivery-only
+  workflow_mode: full             # full | full-dry-run | analysis
   auto_harness: true             # plain requests run through the pipeline
-  question_short_circuit: true   # orchestrator's ANSWER_ONLY stops the pipeline
+  analysis_routing: true         # the orchestrator's ANSWER_ONLY routes to the architect
+  requirements_file: REQUIREMENTS.md  # where the architect keeps the formal scope
   allow_dispatch: true           # enable the harness-dispatch tool
                                    # subagent contract: defaults.subagent_context_file
                                    # if it exists, else pi-minimal-harness.md,
