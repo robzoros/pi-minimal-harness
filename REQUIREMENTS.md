@@ -33,8 +33,13 @@ moves a datum, never a decision.
 
 Context: the defects of `docs_mejoras/mejoras_implementación.md` that survive
 pull request #25, plus the harness behaviour decided in design with the user.
-Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
-`main`.
+REQ-001 to REQ-013 are implemented (REQ-005 superseded) and are on `main`.
+REQ-014 to REQ-016 are new: the tester's own step and the gate it is, a failing
+test routed back to the implementer, and a pipeline that can be resumed after a
+step error — the last one after a run stalled mid-flight and left
+implemented-but-undelivered work with no way to act on it. REQ-017 follows
+Engram itself: the pipeline writes to it on every run and instructs nobody to
+read it, so the memories accumulate unread.
 
 ## Additions
 
@@ -405,35 +410,223 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
 - **Priority**: P1
 - **Status**: `IMPLEMENTED`
 
+### REQ-014 — The tests are a step of their own, and they gate delivery
+
+- **Statement**: The harness shall ship a `tester` agent and shall run it
+  between the implementer and delivery in the `full` workflow, so that the
+  implementer makes the change and the tester writes and runs the tests;
+  delivery shall run only when the checks the tester declared pass. `update`
+  shall insert the `tester` step into an existing installation whose
+  `workflows.full.steps` is still the previously shipped list.
+- **Rationale**: the implementer today writes the change, writes the tests and
+  runs the whole suite in one turn, so the checks it reports are its own and
+  nobody looks at them until delivery. Splitting the duty gives the tests an
+  agent of their own whose declared checks are the ones the harness gates on,
+  and that is the reason to split: a second agent that only observes the result
+  earns its cost only if its result can stop the run. The implementer keeps the
+  cheapest check that proves the code builds, so the tester is never handed
+  something that does not compile. The `update` migration exists because
+  `mergeAdditive` never rewrites a YAML sequence: without it the new agent block
+  is added and the tester never runs on any existing installation.
+- **Acceptance**:
+  - [ ] `workflows.full.steps` is
+        `orchestrator -> explorer -> critic -> implementer -> tester -> delivery`;
+        `full-dry-run` and `analysis` are unchanged.
+  - [ ] `agents.tester` declares `mutates_files: true` and the tools it needs
+        (`filesystem`, `shell`, `tests`, `engram`, `codegraph`).
+  - [ ] The implementer no longer runs the full suite; it runs the cheapest
+        check that proves the change builds, and says which one it ran.
+  - [ ] `prompts/tester.md` tells the tester to write the tests the change
+        needs, run the project's checks, and never edit production code.
+  - [ ] The harness re-runs the **tester's** declared checks before delivery
+        (REQ-002 already captures the last `mutates_files` step).
+  - [ ] `REQUIRED_AGENTS` and `validate` include `tester`.
+  - [ ] The adjusted plan from the critic lists the test files it expects, so
+        REQ-003's diff comparison does not read every added test as a
+        discrepancy.
+  - [ ] `update` inserts the tester step when the local list is exactly the
+        previously shipped one, keeps a customised list and reports it, and is
+        idempotent; `tests/install.test.mjs` covers both cases.
+  - [ ] `tests/harness.test.mjs` asserts the new order and the tester's grant.
+- **Traces**: `harness.config.yaml`, `harness.config.example.yaml`,
+  `prompts/tester.md`, `prompts/implementer.md`, `prompts/critic.md`,
+  `.pi/extensions/harness.ts` (`REQUIRED_AGENTS`, `MODES`),
+  `bin/pi-minimal-harness.mjs` (`full` steps migration),
+  `tests/harness.test.mjs`, `tests/install.test.mjs`
+- **Issue**: #28
+- **Priority**: P1
+- **Status**: `DRAFT`
+
+### REQ-015 — A failing test sends the work back to the implementer, bounded at three rounds
+
+- **Statement**: When the tester declares a check as `failed`, the harness
+  shall start a repair round that returns the failure to the implementer and
+  runs the tester again, shall not re-run the explorer or the critic, and shall
+  stop the pipeline after the third round without reaching delivery.
+- **Rationale**: stopping at the first red test hands the user an unfinished
+  branch and no next move, which is the same dead end as stopping on a step
+  error. The round is sequenced by the driver rather than invoked by the
+  tester, for the reason the harness has already removed the model from three
+  things: a model that decides to retry also decides when to stop retrying.
+  The explorer and the critic do not re-run because the plan already exists;
+  re-deriving it costs two turns to restate what is on disk. Three rounds is a
+  bound, not a target: past the third the failure is the final answer, because a
+  plan that cannot pass its own tests in three goes is a plan the user should
+  see rather than one the harness keeps spending turns on.
+- **Acceptance**:
+  - [ ] A declared check that is `failed` does not end the pipeline: the
+        implementer runs again with the tester's failure — the command and its
+        output — as `{{previous}}`.
+  - [ ] The counter lives in the driver; the tester never invokes the
+        implementer and cannot reset the count.
+  - [ ] At most three repair rounds; after the third there is no delivery and
+        the last failure is the final answer.
+  - [ ] Delivery never runs while a declared check is `failed`; `skipped` is not
+        a pass.
+  - [ ] A round that passes continues to delivery, and no round re-runs the
+        explorer or the critic.
+  - [ ] `tests/harness.test.mjs` covers: one failed round then success reaches
+        delivery; three failures stop the pipeline; the model cannot reset the
+        counter.
+- **Traces**: `.pi/extensions/harness.ts` (repair round, check gate),
+  `prompts/implementer.md`, `prompts/delivery.md`, `tests/harness.test.mjs`
+- **Issue**: #28
+- **Priority**: P1
+- **Status**: `DRAFT`
+
+### REQ-016 — An errored or interrupted pipeline leaves a way forward
+
+- **Statement**: When a step ends in a model error, the harness shall retry it
+  before stopping; and when a pipeline stops with steps left, it shall record
+  its state and offer to continue from where it stopped rather than starting
+  over.
+- **Rationale**: a run that stalls mid-flight leaves implemented-but-undelivered
+  work in the tree with no way out of it. `runPipeline` always starts at step 0,
+  so the next request re-runs the whole workflow; and since REQ-011 the
+  orchestrator has no tools, so on that re-run it can only carry the issue
+  number it reads in the task text, reaches delivery with `none`, and delivery
+  stops to ask the user to authorise creating an issue — the work is finished
+  and the harness reports that nothing can be done with it. Retrying the errored
+  step handles the common case, a transient provider failure, at the cost of one
+  turn; persisting the stopped run and resuming it preserves the context a
+  restart throws away, the issue included. `/harness-delivery` already exists and
+  was never advertised, which is the part of this a user notices first.
+- **Acceptance**:
+  - [ ] A step ending with `stopReason: error` is retried, bounded (one by
+        default), and the retry is announced.
+  - [ ] On a stop with steps remaining, the state (`mode`, `task`, the completed
+        steps, the failed step) is persisted with `pi.appendEntry()` and survives
+        a `/reload`.
+  - [ ] `/harness-resume` continues from the step after the last completed one,
+        without re-running them and without re-running the orchestrator, so the
+        issue it carried is not lost.
+  - [ ] The stop message names the step it stopped at, says the tree holds
+        partial work, and names the two exits: `/harness-resume` and
+        `/harness-delivery`.
+  - [ ] A plain message after a stopped pipeline does not silently re-run the
+        whole workflow while one is stopped: the harness says so and offers the
+        resume.
+  - [ ] `tests/harness.test.mjs` covers: a step error retried once; a stopped
+        pipeline resumed from the right step; the persisted state surviving a
+        re-import.
+- **Traces**: `.pi/extensions/harness.ts` (step retry, pipeline state,
+  `runPipeline` start-at, `harness-resume`, input hook), `pi-minimal-harness.md`,
+  `README.md`, `AGENTS.md`, `tests/harness.test.mjs`
+- **Issue**: #29
+- **Priority**: P1
+- **Status**: `DRAFT`
+
+### REQ-017 — A step reads Engram before it works, not only after
+
+- **Statement**: The harness shall instruct every agent whose output depends on
+  prior project knowledge to consult Engram before it proposes anything, and
+  shall ensure each of those agents holds the tools that read it. The architect,
+  the explorer, the implementer and the critic shall each begin from
+  `mem_context` and `mem_search`, named in their prompt templates alongside the
+  `mem_save` they already name, and `pi-minimal-harness.md` shall state the
+  read-before-work duty rather than only the "search before repeating work"
+  advice.
+- **Rationale**: the pipeline's eight Engram mentions are all `mem_save` — three
+  agents write and no step is told to read. The only read paths are the
+  provider's "when the user asks to recall past work" and recovery after a
+  compaction, and `session_start` injects nothing, so memories accumulate
+  unread: the architect re-derived from scratch a design memory may already have
+  held. The write cost is paid on every run and the read benefit almost never
+  collected. The critic is the sharpest case: the one step whose job is to catch
+  a repeated mistake is the one that cannot consult what the project already
+  learned.
+- **Acceptance**:
+  - [ ] `prompts/architecture.md`, `prompts/explorer.md`, `prompts/implementer.md`
+        and `prompts/critic.md` each name the read — `mem_context` for recent
+        history, then `mem_search` for keywords — before the step proposes or
+        edits.
+  - [ ] `agents.critic.tools` gains `engram`; the architect, explorer and
+        implementer keep the grant they already have.
+  - [ ] `pi-minimal-harness.md` (§Memory) states the read-before-work duty, not
+        only the search advice.
+  - [ ] The read is a starting point, never a gate: empty or absent memory does
+        not stop the step, and the instruction degrades to "continue without it"
+        like the CodeGraph grant.
+  - [ ] The orchestrator and delivery are neither instructed to read nor granted
+        `engram`; the router stays tool-less (REQ-011).
+  - [ ] `tests/harness.test.mjs` asserts each template names the read and that
+        the critic holds the grant.
+- **Traces**: `prompts/architecture.md`, `prompts/explorer.md`,
+  `prompts/implementer.md`, `prompts/critic.md`, `pi-minimal-harness.md`,
+  `harness.config.yaml`, `harness.config.example.yaml`, `tests/harness.test.mjs`
+- **Issue**: #31
+- **Priority**: P2
+- **Status**: `IMPLEMENTED`
+
 ## Modifications
 
 - `prompts/orchestrator.md` — REQ-008 and REQ-011: route and hand over, without
   analysing; issues belong to the architect, and the router has no tool for them.
 - `prompts/architecture.md` — REQ-007, REQ-011 and the write rule above: the
   architect may write the scope only on your validation and only while a
-  requirement is not terminal, and creates the issue the work closes.
+  requirement is not terminal, and creates the issue the work closes. REQ-017: it
+  reads Engram before it proposes.
 - `prompts/implementer.md` — REQ-007 and the write rule above: the implementer
   may move `Status` to `IMPLEMENTED` when its checks pass and its acceptance
-  criteria are certified, and may touch nothing else in the block.
+  criteria are certified, and may touch nothing else in the block. REQ-014 and
+  REQ-015: it implements the change and runs only the cheapest check that
+  proves it builds, it hands the tests to the tester, and on a repair round it
+  receives the tester's failure as `{{previous}}`. REQ-017: it reads Engram before
+  it edits.
 - `prompts/delivery.md` — REQ-002 (the harness runs the checks, not the agent),
   and REQ-012 (this is where the branch rule lives, so the skill points here).
-- `prompts/explorer.md` — REQ-001, on the dispatch path only.
+  REQ-014 and REQ-015: the checks it is gated on are the tester's, and it never
+  runs while a declared check is `failed`.
+- `prompts/explorer.md` — REQ-001, on the dispatch path only. REQ-017: it reads
+  Engram before it proposes.
+- `prompts/tester.md` (new) — REQ-014: write the tests the change needs, run
+  the project's checks, and never edit production code.
+- `prompts/critic.md` — REQ-014: the adjusted plan lists the test files it
+  expects, so REQ-003's diff comparison does not read every test the tester adds
+  as a discrepancy. REQ-017: it reads Engram before it challenges the plan.
 - `.pi/extensions/harness.ts` — the `<repo_content>` wrapper, the check gate before
   delivery, the plan-versus-diff comparison, the dispatch overlap refusal, the
   two new commands, the removal of the architect's own close, and the persisted
-  design-session state.
+  design-session state. REQ-014 `REQUIRED_AGENTS` and the mode string, REQ-015
+  the bounded repair round the driver owns, REQ-016 the step retry, the
+  persisted stopped-pipeline state, `runPipeline` start-at and `/harness-resume`.
 - `harness.config.yaml`, `harness.config.example.yaml` — REQ-006
   `defaults.requirements_format`, REQ-008 and REQ-011 the tools each agent is
-  granted, and this repository's own `req-n`.
+  granted, and this repository's own `req-n`. REQ-017: `engram` reaches the
+  critic, and still nobody else.
 - `bin/pi-minimal-harness.mjs` (`ensureRequirements`) — REQ-006: emit the shape
-  the project chose, and honour `defaults.requirements_file`.
+  the project chose, and honour `defaults.requirements_file`. REQ-014: migrate
+  `workflows.full.steps` to include the tester when the local list is still the
+  previously shipped one.
 - `.agents/skills/github-delivery/SKILL.md` — REQ-012: point at the prompt that
   owns the branch rule instead of restating it.
 - `tests/install.test.mjs`, `tests/harness.test.mjs` — one test per requirement,
   each asserting the refusal rather than only the success path; REQ-013 covers
-  `/harness-validate`, which has shipped without a single test.
+  `/harness-validate`, which has shipped without a single test. REQ-017 asserts
+  each of the four templates names the read and that the critic holds the grant.
 - `AGENTS.md`, `pi-minimal-harness.md`, `README.md`, `docs/WORKFLOW.md`,
-  `CHANGELOG.md` — the published surface follows the change.
+  `CHANGELOG.md` — the published surface follows the change, including the
+  read-before-work duty REQ-017 adds to the contract's memory section.
 
 ## Out of scope
 

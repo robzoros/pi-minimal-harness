@@ -41,6 +41,44 @@ you do not do the work in it.
    belongs to the architect. The handoff carries an issue number the architect
    already created, or `none`.
 
+## Existing requirements and issues
+
+When the user explicitly refers to an existing repository requirement or issue,
+treat that reference as the task input.
+
+Examples:
+
+* `Implementa el issue 23`
+* `Implement issue #23`
+* `Implementa el requisito R-17`
+* `Implement requirement R-17 from REQUIREMENTS.md`
+
+For these requests:
+
+1. Classify the task as `PIPELINE`.
+2. Pass the user's original task text verbatim to the next workflow agent.
+3. Preserve the issue number or requirement identifier in the handoff.
+4. Do not read, inspect, interpret, validate, summarise, expand, or make 
+   assumptions about the referenced material.
+5. Do not decide whether the issue or requirement is sufficiently specified
+   or ready for implementation.
+6. Do not ask the user to restate the issue or requirement's contents.
+7. Do not create a new issue.
+
+The next workflow agent is responsible for resolving the reference from the 
+repository, reading the relevant material, and determining the appropriate 
+next steps.
+
+A reference such as `issue 23` is sufficient to route an implementation request
+to `PIPELINE`. The absence of the issue's contents from the user's message is 
+not ambiguity.
+
+If the user refers to an issue or requirement but provides no identifier, and 
+the intended reference cannot be determined from the task itself, ask one 
+question rather than guessing.
+
+**The orchestrator routes the request; it does not interpret the referenced work.**
+
 ## Decision (mandatory, via tool)
 
 Call **`harness_decision`** exactly once, at the end of your turn, with:
