@@ -1445,9 +1445,29 @@ check(
   mod.getAgentTools(cfgLines, "architect").includes("github"),
   mod.getAgentTools(cfgLines, "architect").join(","),
 );
+// REQ-017: `engram` reaches the four agents whose output depends on prior
+// project knowledge. The set is named for reading, not for writing: the critic
+// records no `mem_save`, so the old "agents that record findings" name would
+// have been false the moment the critic joined.
+const engramReaders = ["architect", "explorer", "implementer", "critic"];
 check(
-  "config: engram stays with the agents that record findings",
-  ["explorer", "implementer"].every((a) => mod.getAgentTools(cfgLines, a).includes("engram")),
+  "config: engram reaches the four agents that read it",
+  engramReaders.every((a) => mod.getAgentTools(cfgLines, a).includes("engram")),
+  engramReaders.filter((a) => !mod.getAgentTools(cfgLines, a).includes("engram")).join(",") || "all four hold it",
+);
+// The example config is what `init` copies, so the grant has to ship in it too.
+// `exampleLines` is declared further down; read it here under its own name.
+const exampleLinesForEngram = (await fs.readFile(path.join(ROOT, "harness.config.example.yaml"), "utf8")).split("\n");
+check(
+  "config: the shipped example grants engram to the critic too",
+  engramReaders.every((a) => mod.getAgentTools(exampleLinesForEngram, a).includes("engram")),
+  engramReaders.filter((a) => !mod.getAgentTools(exampleLinesForEngram, a).includes("engram")).join(",") ||
+    "all four hold it",
+);
+check(
+  "config: neither the router nor delivery holds engram",
+  !mod.getAgentTools(cfgLines, "orchestrator").includes("engram") &&
+    !mod.getAgentTools(cfgLines, "delivery").includes("engram"),
 );
 check(
   "config: an agent without a tools list still resolves to no tools (backward compatibility)",
@@ -1521,6 +1541,38 @@ check(
 check(
   "prompt: the router is told not to explore, and not to size the task",
   /do not explore/i.test(await fs.readFile(path.join(ROOT, "prompts", "orchestrator.md"), "utf8")),
+);
+// REQ-017: the read the write already had. Each of the four templates that owes
+// one names it before it proposes or edits, and the two that must not read
+// name neither the read nor the write.
+const readTemplates = ["architecture.md", "explorer.md", "implementer.md", "critic.md"];
+const readerBodies = Object.fromEntries(
+  await Promise.all(readTemplates.map(async (f) => [f, await fs.readFile(path.join(ROOT, "prompts", f), "utf8")])),
+);
+const readTemplatesMissing = readTemplates.filter(
+  (f) => !readerBodies[f].includes("mem_context") || !readerBodies[f].includes("mem_search"),
+);
+check(
+  "prompt: the four readers name mem_context and mem_search before they work",
+  readTemplatesMissing.length === 0,
+  readTemplatesMissing.join(",") || readTemplates.join(", "),
+);
+check(
+  "prompt: the read is never a gate — each reader says an absent memory does not stop it",
+  readTemplates.every((f) => /never a gate/i.test(readerBodies[f])),
+  readTemplates.filter((f) => !/never a gate/i.test(readerBodies[f])).join(",") || "all four say it",
+);
+const nonReaders = ["orchestrator.md", "delivery.md"];
+check(
+  "prompt: the router and delivery name neither the read nor the write",
+  (await Promise.all(
+    nonReaders.map((f) => fs.readFile(path.join(ROOT, "prompts", f), "utf8")),
+  )).every((body) => !/mem_context|mem_search/.test(body)),
+  nonReaders.join(", "),
+);
+check(
+  "contract: the memory section states the read-before-work duty, and who does not read",
+  /\*\*Read\*\* before working/.test(await fs.readFile(path.join(ROOT, "pi-minimal-harness.md"), "utf8")),
 );
 const reportTemplates = {};
 for (const f of ["critic.md", "delivery.md", "explorer.md", "implementer.md"]) {

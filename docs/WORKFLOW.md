@@ -50,8 +50,8 @@ Responsibilities:
 - size the task with structural code exploration when it helps, without taking
   over the explorer's deep dive;
 - prepare the handoff for the next step;
-- decide whether Engram should be queried (OpenSpec is the explorer's and the
-  critic's tool, not the orchestrator's);
+- stay tool-less: the router is granted no tools at all, so OpenSpec and Engram
+  belong to the explorer and the critic, never to it;
 - identify which of the repository's own rules, already injected, apply to the
   task;
 - carry the issue the architect created, or `none`;
@@ -103,7 +103,8 @@ Responsibilities:
 - check applicable `AGENTS.md` rules;
 - consult OpenSpec when relevant;
 - use CodeGraph/CodeCraft when structural exploration helps;
-- query Engram when previous knowledge may matter;
+- read Engram before exploring when previous knowledge may matter, and record
+  what is worth reusing back into it;
 - identify likely affected files and tests;
 - propose an implementation approach.
 
@@ -410,8 +411,10 @@ The Pi run commands should use the `harness-run` skill.
 
 ## Memory Policy
 
-Engram may be read by the orchestrator, explorer, or implementer when previous
-project knowledge is likely to matter.
+Engram is read before working by the architect, explorer, implementer and
+critic — `mem_context` for recent history, then `mem_search` — when previous
+project knowledge is likely to matter. The router and the delivery agent are not
+readers: the router is granted no tools at all, and delivery is mechanical.
 
 Engram writes should be explicit and selective. Store stable knowledge, not
 transcripts or temporary progress.

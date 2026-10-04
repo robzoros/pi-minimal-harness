@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A step reads Engram before it works, not only after.** The write side was
+  mandatory and the read side was nowhere: every Engram mention in the prompt
+  templates was a `mem_save`, so three agents paid to write memories that no
+  step was told to open. The architect, explorer, implementer and critic now
+  consult `mem_context` and then `mem_search` before they propose or edit, when
+  previous project knowledge is likely to matter, and the critic is recorded as
+  holding the grant it was missing — the one step whose job is to catch a plan
+  that repeats a known failure could not consult what the project had already
+  learned. The router and the delivery agent are deliberately not readers: the
+  router is granted no tools at all, and delivery is mechanical. The read is a
+  starting point and never a gate — an empty or absent memory does not stop a
+  step. This is an instruction and a record, not an enforced tool set: like
+  every `tools:` grant it says what the step is expected to use, and the
+  `mem_*` tools are the memory provider's, available in the session already.
 - **A design session that survives `/reload`.** The open/closed state is written
   with `pi.appendEntry()` — Pi's slot for durable data that must stay out of the
   model context — and restored in `session_start`, from the active branch. A

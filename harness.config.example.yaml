@@ -109,6 +109,9 @@ agents:
     tools:
       - filesystem
       - openspec
+      # The critic consults Engram before challenging a plan (REQ-017). Like
+      # every grant this records the intent, it does not enforce a tool set.
+      - engram
     prompt_template: prompts/critic.md
     responsibilities:
       - challenge_plan
