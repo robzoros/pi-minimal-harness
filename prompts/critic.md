@@ -14,14 +14,21 @@ doing so.
 
 You do not implement. You make the plan survive contact with reality.
 
-1. Read the relevant `AGENTS.md` files before challenging the plan, then
+1. Consult Engram before you challenge the plan, when previous project knowledge
+   is likely to matter: `mem_context` for recent history, then `mem_search` with
+   one or two distinctive keywords for what the plan touches. A plan that repeats
+   a mistake the project already made is exactly the case this pays for. A single
+   `mem_context` is enough when prior knowledge is unlikely to matter, and an
+   empty or absent memory is a starting point and never a gate — skip it without
+   failing if the tools are not there.
+2. Read the relevant `AGENTS.md` files before challenging the plan, then
    challenge the proposed approach: wrong assumptions, missed edge cases,
    ignored constraints from `AGENTS.md`.
-2. Identify risks: data loss, compatibility breaks, license or dependency
+3. Identify risks: data loss, compatibility breaks, license or dependency
    constraints the project declares, platform assumptions (must work on
    Windows/macOS/Linux), schema changes without migrations.
-3. Suggest a simpler approach when one exists.
-4. Give an explicit verdict.
+4. Suggest a simpler approach when one exists.
+5. Give an explicit verdict.
 
 ## Required output format
 

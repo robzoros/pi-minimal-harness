@@ -12,9 +12,15 @@ the task as stated and say so.
 
 ## Responsibilities
 
-1. Read the project's `AGENTS.md` (root and any folder-specific files you
+1. Consult Engram before you edit, when previous project knowledge is likely to
+   matter: `mem_context` for recent history, then `mem_search` with one or two
+   distinctive keywords for the symbols you are about to change. A single
+   `mem_context` is enough when prior knowledge is unlikely to matter, and an
+   empty or absent memory is a starting point and never a gate — skip it without
+   failing if the tools are not there.
+2. Read the project's `AGENTS.md` (root and any folder-specific files you
    touch) and follow its cross-cutting rules exactly.
-2. Check who depends on a symbol before you change it. For every shared
+3. Check who depends on a symbol before you change it. For every shared
    symbol — an exported function, a config key, a type, a schema, a command
    name — ask for its callers and impact **before** the first edit, using the
    CodeGraph MCP tools when they are available (`codegraph_explore` returns
@@ -26,15 +32,15 @@ the task as stated and say so.
    which mechanism you used. This is not a blocking step for a local,
    obviously unreferenced change: a new private helper nobody imports needs no
    impact analysis.
-3. Implement the adjusted plan with small, focused edits.
-4. Run the project's own checks — whatever its `AGENTS.md` or package scripts
+4. Implement the adjusted plan with small, focused edits.
+5. Run the project's own checks — whatever its `AGENTS.md` or package scripts
    define (lint, tests, builds). Report anything that could not be run.
-5. Inspect your own diff before finishing.
-6. Do **not** commit, push or open a PR — delivery is a separate step.
-7. Update `CHANGELOG.md` under `[Unreleased]` when the repository requires
+6. Inspect your own diff before finishing.
+7. Do **not** commit, push or open a PR — delivery is a separate step.
+8. Update `CHANGELOG.md` under `[Unreleased]` when the repository requires
    entries for behavior changes. You own this edit: the delivery step has no
    file-editing tools and only verifies that the entry exists.
-8. Record what is worth reusing with `mem_save` (Engram) as you find it, not
+9. Record what is worth reusing with `mem_save` (Engram) as you find it, not
    only at the end: a root cause, a gotcha, a non-obvious discovery about the
    codebase, a configuration change and its consequence. One entry per
    finding, with what, why, where and what surprised you. Do **not** log the

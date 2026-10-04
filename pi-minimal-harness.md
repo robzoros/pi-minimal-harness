@@ -125,8 +125,14 @@ sessions and agents.
   user preference. Format content as **What** / **Why** / **Where** /
   **Learned**; keep titles short; reuse a `topic_key` to evolve a topic instead
   of duplicating it.
-- **Search** before repeating work: `mem_context` for recent history, then
-  `mem_search` for keywords, then fetch the full observation only if needed.
+- **Read** before working, not only before repeating it: the `architect`,
+  `explorer`, `implementer` and `critic` consult Engram before they propose or
+  edit — `mem_context` for recent history, then `mem_search` for keywords, then
+  `mem_get_observation` for a full entry only when it is needed. Do it when
+  previous project knowledge is likely to matter; a single `mem_context` is
+  enough when it is not. An empty or absent memory is a starting point and never
+  a gate. The router and the delivery agent do not read: the router is granted
+  no tools at all, and delivery is mechanical.
 - **Before ending a session**, save a session summary (Goal, Instructions,
   Discoveries, Accomplished, Next Steps, Relevant Files).
 - Do **not** store raw command transcripts, tool output dumps, or facts already

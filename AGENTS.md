@@ -87,8 +87,10 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   what earns a repair turn.
 - Exploration and memory are reachable in every mode, not only in `full`:
   `codegraph` is granted to the `architect`, `explorer` and `implementer`, and
-  `engram` to the same three, and the prompt templates name
-  both. A grant is declarative, so a runtime without the tool degrades to the
+  `engram` to those three and the `critic`, and the prompt templates name
+  both — the write (`mem_save`) and, for those four, the read (`mem_context`
+  then `mem_search`) they owe before proposing or editing. A grant is
+  declarative, so a runtime without the tool degrades to the
   `grep`/`rg` fallback the templates describe instead of failing.
 - The repository preflight reads `defaults.preflight_policy`: `advisory` only
   reports, `blocking` stops the first agent marked `mutates_files: true` when

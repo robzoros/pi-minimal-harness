@@ -14,12 +14,18 @@ and say so.
 
 Explore only — **do not edit any file** in this step.
 
-1. Read the relevant `AGENTS.md` files before touching anything.
-2. Locate the relevant files, modules and symbols. Read them directly; use
+1. Consult Engram before you explore, when previous project knowledge is likely
+   to matter: `mem_context` for recent history, then `mem_search` with one or
+   two distinctive keywords for the symbols and paths the task names. A single
+   `mem_context` is enough when prior knowledge is unlikely to matter, and an
+   empty or absent memory is a starting point and never a gate — skip it without
+   failing if the tools are not there.
+2. Read the relevant `AGENTS.md` files before touching anything.
+3. Locate the relevant files, modules and symbols. Read them directly; use
    CodeGraph when relationships or impact of a change matter.
-3. Identify the existing patterns and conventions a solution must follow.
-4. Propose a concrete solution approach: ordered steps and affected files.
-5. Record what is worth reusing with `mem_save` (Engram): where the relevant
+4. Identify the existing patterns and conventions a solution must follow.
+5. Propose a concrete solution approach: ordered steps and affected files.
+6. Record what is worth reusing with `mem_save` (Engram): where the relevant
    code lives and how it is wired, a gotcha, a non-obvious discovery about
    the codebase. One entry per finding, with what, why, where and what
    surprised you — findings, not a transcript of what you read. If the Engram
