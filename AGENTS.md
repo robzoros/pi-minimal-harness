@@ -85,6 +85,21 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   also saves with `mem_save`. The driver validates presence, not content
   (`reportGaps`), so `[]` is the way to say "nothing" and an omitted field is
   what earns a repair turn.
+- A step whose turn ends in a model error is retried once (`STEP_RETRY_LIMIT`)
+  and the retry is announced; an abort is not retried. A pipeline that stops
+  with steps left records `mode`, `task`, `steps`, `completed` and `failedStep`
+  in its own `appendEntry` custom entry and names two exits:
+  `/harness-resume` continues from the step after the last completed one
+  without re-running them or the orchestrator, and `/harness-delivery`
+  delivers what is verified. Both clear the record, as does a forced
+  `/harness-run`, which abandons the stopped run; so while one is recorded a
+  plain message is refused with those two exits named rather than silently
+  re-running the whole workflow — unless `auto_harness` is off, in which case
+  the stop is reported and the message is let through, since nothing would have
+  turned it into a pipeline. A resume skips the blocking preflight, whose
+  blocker would be the partial work being resumed. A retried step is judged on
+  its own decision: a decision emitted by an attempt that then failed does not
+  survive into the retry.
 - Exploration and memory are reachable in every mode, not only in `full`:
   `codegraph` is granted to the `architect`, `explorer` and `implementer`, and
   `engram` to those three and the `critic`, and the prompt templates name

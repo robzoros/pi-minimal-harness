@@ -85,6 +85,12 @@ const assistantScript = [];
 const toolErrors = [];
 /** Tool call to emit on the next assistant turn: { name, params, text }. */
 let pendingToolCall = null;
+/**
+ * Stop reason the next scripted assistant turn ends with. Reset by `reset()`;
+ * a scripted `{ text, stopReason }` entry sets it (REQ-016). The pipeline reads
+ * it through the branch, exactly as the real runtime reports it.
+ */
+let assistantStopReason = "end";
 let assistantTextOverride = null;
 let turnN = 0;
 let assistantTurns = 0;
@@ -92,7 +98,19 @@ let idle = true;
 let activeCtx = null;
 
 const nextAssistantText = (turn = 0) => {
-  if (assistantScript.length > 0) return assistantScript.shift();
+  // A scripted entry may be an object, to script the stop reason as well as the
+  // text: REQ-016 retries a step whose turn ends in `error`, and the pipeline
+  // path had no way to produce one before this. The reason is latched into
+  // `assistantStopReason` and consumed by the turn that carries the text, so a
+  // scripted `{ text, stopReason }` describes the turn it is paired with.
+  if (assistantScript.length > 0) {
+    const entry = assistantScript.shift();
+    if (entry && typeof entry === "object") {
+      if (entry.stopReason) assistantStopReason = entry.stopReason;
+      return entry.text ?? "";
+    }
+    return entry;
+  }
   if (assistantTextOverride) return assistantTextOverride;
   turnN++;
   // The first assistant turn is the orchestrator: it must declare a decision on
@@ -172,10 +190,17 @@ const fakePi = {
         }
         await new Promise((r) => setTimeout(r, 20));
       }
+      // Order matters: the text is drawn first, because a scripted object entry
+      // latches the stop reason for the turn it belongs to. The latch is then
+      // consumed, so the turn after it ends normally unless it is scripted too.
+      const turnText = nextAssistantText(assistantTurns);
+      const turnStopReason = assistantStopReason;
+      assistantStopReason = "end";
       let message = {
         role: "assistant",
-        stopReason: "end",
-        content: [{ type: "text", text: nextAssistantText(assistantTurns) }],
+        stopReason: turnStopReason,
+        errorMessage: turnStopReason === "error" ? "simulated model error" : undefined,
+        content: [{ type: "text", text: turnText }],
       };
       const handler = events["message_end"];
       if (handler) {
@@ -234,6 +259,7 @@ const reset = () => {
   thinkingCalls.length = 0;
   assistantScript.length = 0;
   assistantTextOverride = null;
+  assistantStopReason = "end";
   assistantTurns = 0;
   pendingToolCall = null;
   toolErrors.length = 0;
@@ -2043,6 +2069,271 @@ sent.length = 0;
 await events["input"]({ text: "comprobación", source: "interactive" }, makeCtx(tmp, false));
 await new Promise((r) => setTimeout(r, 1500));
 check("session: no session is left armed", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
+
+// REQ-016: a step whose turn ends in a model error is retried once. The common
+// cause is a transient provider failure, and one turn is cheap against stopping
+// a run that already holds implemented work. The error is scripted on the
+// explorer, not on the orchestrator, so the run also gets past step 1 and the
+// resume case below has a completed step to resume from.
+reset();
+assistantScript.push(
+  "Plan.\n\nHARNESS-DECISION: PIPELINE",
+  { text: "the provider died", stopReason: "error" },
+  "Findings.\n\nHARNESS-DONE",
+  "Critique.\n\nHARNESS-DONE",
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "retry me", waitTurn);
+check(
+  "resume: an errored step is retried and the retry is announced",
+  sent.length === 4 && notifies.some((n) => n.includes("failed: simulated model error") && n.includes("Retrying it once")),
+  `sent=${sent.length} ${notifies.join(" | ")}`,
+);
+check(
+  "resume: the retried step is the same step, re-sent unchanged",
+  sent[1] === sent[2] && sent[1]?.includes("prompts/explorer.md"),
+  `s1=${String(sent[1]).slice(0, 50)} s2=${String(sent[2]).slice(0, 50)}`,
+);
+check(
+  "resume: a step that recovers on the retry runs the whole workflow",
+  notifies.some((n) => n.includes('Pipeline "full-dry-run" finished: orchestrator -> explorer -> critic')),
+  notifies.join(" | "),
+);
+
+// The bound is real: a second error stops the run instead of retrying forever,
+// and this is the state the resume path is built on.
+reset();
+assistantScript.push(
+  "Plan.\n\nHARNESS-DECISION: PIPELINE",
+  { text: "first failure", stopReason: "error" },
+  { text: "second failure", stopReason: "error" },
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "stop here", waitTurn);
+check(
+  "resume: the retry is bounded at one and the second error stops the pipeline",
+  sent.length === 3 &&
+    notifies.some((n) => n.includes("Pipeline failed at step 2 (explorer)")) &&
+    !notifies.some((n) => n.includes("attempt 3")),
+  `sent=${sent.length} ${notifies.join(" | ")}`,
+);
+
+// A stopped run leaves a way forward: the state is written to the branch, and
+// the branch is what survives a `/reload` (REQ-009's precedent).
+const stopped = mod.readStoppedPipelineFromBranch(branchArr);
+check(
+  "resume: a stopped pipeline persists mode, task, completed and failed step",
+  !!stopped &&
+    stopped.mode === "full-dry-run" &&
+    stopped.task === "stop here" &&
+    JSON.stringify(stopped.completed) === '["orchestrator"]' &&
+    stopped.failedStep === "explorer" &&
+    JSON.stringify(stopped.steps) === '["orchestrator","explorer","critic"]',
+  JSON.stringify(stopped),
+);
+check(
+  "resume: an empty branch reads as no stop, so a reload resurrects nothing",
+  mod.readStoppedPipelineFromBranch([]) === null,
+);
+check(
+  "resume: a malformed entry reads as no stop rather than throwing",
+  mod.readStoppedPipelineFromBranch([
+    { type: "custom", customType: "pi-minimal-harness:stopped-pipeline", data: { stopped: true, mode: 7 } },
+  ]) === null,
+);
+// REQ-009's session persistence is asserted through the exported branch reader;
+// this one re-imports the module for real, so "survives a re-import" is measured
+// rather than assumed. The entry lives in the branch, not in module state, which
+// is what makes it outlive the runtime that wrote it.
+const reimported = await import(`${pathToFileURL(path.join(ROOT, ".pi", "extensions", "harness.ts")).href}?reload=1`);
+check(
+  "resume: the persisted stop survives a re-import of the extension",
+  reimported.readStoppedPipelineFromBranch(branchArr)?.failedStep === "explorer",
+  JSON.stringify(reimported.readStoppedPipelineFromBranch(branchArr)),
+);
+check(
+  "resume: the stop message names the step, the partial work and both exits",
+  notifies.some(
+    (n) =>
+      n.includes("stopped at step 2 (explorer)") &&
+      n.includes("partial work") &&
+      n.includes("/harness-resume") &&
+      n.includes("/harness-delivery"),
+  ),
+  notifies.join(" | "),
+);
+
+// A plain message must not silently re-run the whole workflow over a stopped
+// run: that would discard the completed steps and — the router holds no tools —
+// reach delivery without the issue the original run carried.
+//
+// `reset()` is deliberately not used here: it clears `branchArr`, which is
+// where the stop is persisted, so the guard would find nothing to refuse. Only
+// the observation arrays are cleared.
+sent.length = 0;
+notifies.length = 0;
+const guarded = await events["input"]({ text: "y ahora?", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 250));
+check(
+  "resume: a plain message while stopped is refused and names the two exits",
+  guarded.action === "handled" &&
+    sent.length === 0 &&
+    notifies.some((n) => n.includes('stopped at "explorer"') && n.includes("/harness-resume")),
+  `action=${guarded.action} sent=${sent.length} ${notifies.join(" | ")}`,
+);
+check(
+  "resume: the refused message did not start a new pipeline",
+  !sent.some((s) => s.includes("prompts/orchestrator.md")),
+  `sent=${sent.length}`,
+);
+// The same guard must not eat the message when auto-harness is off: `/harness-auto
+// off` promises that a plain request goes to the model, and nothing would have
+// replaced this one with a pipeline. The stop is still worth reporting — the
+// partial work is still in the tree — but the message is the user's.
+const cfgBeforeAutoOff = await fs.readFile(cfgPath, "utf8");
+await fs.writeFile(cfgPath, cfgBeforeAutoOff.replace("  auto_harness: true", "  auto_harness: false"));
+sent.length = 0;
+notifies.length = 0;
+const passedThrough = await events["input"]({ text: "una pregunta normal", source: "interactive" }, makeCtx(tmp, false));
+await new Promise((r) => setTimeout(r, 250));
+check(
+  "resume: with auto-harness off the guard reports the stop but lets the message through",
+  passedThrough.action === "continue" &&
+    sent.length === 0 &&
+    notifies.some((n) => n.includes("A pipeline stopped at") && !n.includes("not sent to a new pipeline")),
+  `action=${passedThrough.action} sent=${sent.length} ${notifies.join(" | ")}`,
+);
+check(
+  "resume: the message passed through did not start a pipeline either",
+  !sent.some((s) => s.includes("prompts/orchestrator.md")),
+  `sent=${sent.length}`,
+);
+await fs.writeFile(cfgPath, cfgBeforeAutoOff);
+
+// /harness-resume continues from the step after the last completed one — and
+// never re-runs the orchestrator, which is what would lose the issue.
+sent.length = 0;
+notifies.length = 0;
+await commands["harness-resume"].handler("", makeCtx(tmp, true));
+check(
+  "resume: /harness-resume starts at the step after the last completed one",
+  sent.length === 2 && !sent.some((s) => s.includes("prompts/orchestrator.md")) && sent[0]?.includes("prompts/explorer.md"),
+  `sent=${sent.length} ${sent.map((s) => String(s).slice(0, 26)).join(" | ")}`,
+);
+check(
+  "resume: the resumed step is told what already completed",
+  sent.some((s) => s.includes("Resuming a stopped pipeline") && s.includes("orchestrator")),
+  String(sent[0]).slice(0, 140),
+);
+check(
+  "resume: a resumed run that completes leaves nothing to resume",
+  notifies.some((n) => n.includes('Pipeline "full-dry-run" finished')) &&
+    mod.readStoppedPipelineFromBranch(branchArr) === null,
+  `${notifies.join(" | ")} | stopped=${JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr))}`,
+);
+
+// A forced run is a third way to walk away from a resumable stop. Left alone it
+// inherits the record, and when the new run also stopped it overwrote it — the
+// earlier run's completed steps gone with no way back.
+reset();
+assistantScript.push(
+  "Plan.\n\nHARNESS-DECISION: PIPELINE",
+  { text: "first failure", stopReason: "error" },
+  { text: "second failure", stopReason: "error" },
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "stop once more", waitTurn);
+check(
+  "resume: a stop is recorded for the forced-run case",
+  mod.readStoppedPipelineFromBranch(branchArr)?.task === "stop once more",
+  JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+);
+// No reset(): it clears the branch, which is where the stop lives. Clear only the
+// observation arrays so the /harness-run notification is the thing measured.
+sent.length = 0;
+notifies.length = 0;
+// Its own turns are scripted rather than left to the fake's turn counter: this
+// run must reach completion so the assertion below measures the clear and not a
+// second stop it recorded for itself.
+assistantScript.push(
+  "Plan.\n\nHARNESS-DECISION: PIPELINE",
+  "Findings.\n\nHARNESS-DONE",
+  "Critique.\n\nHARNESS-DONE",
+);
+await commands["harness-run"].handler("a different task", makeCtx(tmp, true));
+check(
+  "resume: /harness-run names the stop it abandons instead of dropping it silently",
+  notifies.some((n) => n.includes('Abandoning the pipeline stopped at "explorer"')),
+  notifies.join(" | "),
+);
+check(
+  "resume: /harness-run consumes the stop it abandons",
+  mod.readStoppedPipelineFromBranch(branchArr) === null,
+  JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+);
+
+// The second exit clears the record too, or the guard would keep offering a
+// resume with nothing left to resume.
+reset();
+assistantScript.push(
+  "Plan.\n\nHARNESS-DECISION: PIPELINE",
+  { text: "first failure", stopReason: "error" },
+  { text: "second failure", stopReason: "error" },
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "stop again", waitTurn);
+check(
+  "resume: a fresh stop is recorded again",
+  mod.readStoppedPipelineFromBranch(branchArr)?.task === "stop again",
+  JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+);
+reset();
+await commands["harness-delivery"].handler("", makeCtx(tmp, true));
+await new Promise((r) => setTimeout(r, 300));
+check(
+  "resume: /harness-delivery consumes the stop it is the exit for",
+  mod.readStoppedPipelineFromBranch(branchArr) === null && sent.some((s) => s.includes("prompts/delivery.md")),
+  `stopped=${JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr))} sent=${sent.length}`,
+);
+
+// A completed run must not leave a stop behind: that is what would keep the
+// input hook pointing at a resume of a pipeline that already finished.
+reset();
+await new Promise((r) => setTimeout(r, 300));
+reset();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "a clean task", waitTurn);
+check(
+  "resume: a completed pipeline persists no stop",
+  mod.readStoppedPipelineFromBranch(branchArr) === null &&
+    notifies.some((n) => n.includes('finished: orchestrator -> explorer -> critic')),
+  `stopped=${JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr))} ${notifies.join(" | ")}`,
+);
+reset();
+const sentBeforeNothingToResume = sent.length;
+await commands["harness-resume"].handler("", makeCtx(tmp, true));
+check(
+  "resume: /harness-resume with nothing stopped says so and runs nothing",
+  sent.length === sentBeforeNothingToResume && notifies.some((n) => n.includes("No pipeline is waiting to be resumed")),
+  notifies.join(" | "),
+);
+// A decision emitted by an attempt that then failed belongs to that attempt. The
+// message_end hook only records a decision when the slot is empty and the slot
+// was cleared per step, not per attempt, so the failed attempt's decision used to
+// survive into its successful retry — and an orchestrator that said ANSWER_ONLY
+// before erroring would route the retry into the analysis workflow.
+reset();
+assistantScript.push(
+  { text: "This needs design.\n\nHARNESS-DECISION: ANSWER_ONLY", stopReason: "error" },
+  "Recovered, but with no decision this time.",
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "leaky decision", waitTurn);
+check(
+  "resume: a failed attempt's decision does not leak into its retry",
+  !sent.some((s) => s.includes("prompts/architecture.md")) &&
+    !notifies.some((n) => n.includes('Routed to "analysis"')),
+  `sent=${sent.length} ${notifies.join(" | ")}`,
+);
+check(
+  "resume: the retry is judged on its own decision, so a silent retry fails closed",
+  notifies.some((n) => n.includes("the orchestrator declared no decision")),
+  notifies.join(" | "),
+);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
