@@ -49,8 +49,23 @@ mechanism, and the reference section above tells them to read this file.
   `defaults.preflight_policy: blocking` a dirty tree or an open pull request
   holds back the first step whose agent is marked `mutates_files: true`, and
   the harness reports the blocker instead of sending the step.
+- A step whose turn ends in a model error is retried once, and the retry is
+  announced. An abort is not retried: the user asked for it to stop.
+- A pipeline that stops with steps left records its state — the mode, the task,
+  the steps that completed and the step it stopped on — and names two ways
+  forward: `/harness-resume` continues from the step after the last completed
+  one without re-running the earlier steps (and therefore without re-running
+  the orchestrator, which would lose the issue the run carried), and
+  `/harness-delivery` delivers what is already verified. While such a stop is
+  recorded, a plain message is not turned into a new pipeline: the harness says
+  a pipeline stopped and points at both exits. Both exits clear the record, as
+  does a forced `/harness-run`, which abandons the stopped run because it starts
+  a new task from the first step. With `defaults.auto_harness: false` a recorded
+  stop is reported but the plain message is let through: it is the user's, and
+  nothing would have turned it into a pipeline.
 - Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
-  supported reasoning effort), `/harness-run <task>`, `/harness-delivery
+  supported reasoning effort), `/harness-run <task>`, `/harness-resume
+  [note]`, `/harness-delivery
   [instructions]`, `/harness-auto [on|off]`, `/harness-validate [note]` and
   `/harness-end`. `/harness-delivery` runs the delivery agent without changing
   `defaults.workflow_mode`.

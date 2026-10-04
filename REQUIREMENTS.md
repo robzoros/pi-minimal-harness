@@ -534,7 +534,7 @@ read it, so the memories accumulate unread.
   `README.md`, `AGENTS.md`, `tests/harness.test.mjs`
 - **Issue**: #29
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-017 — A step reads Engram before it works, not only after
 

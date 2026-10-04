@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An errored or interrupted pipeline leaves a way forward.** A step whose turn
+  ends in a model error is retried once, and the retry is announced; an abort is
+  not retried, because the user asked for it to stop. When a run still stops
+  with steps left — an error that outlived its retry, an abort, a missing
+  report — the harness records the mode, the task, the completed steps and the
+  step it stopped on, and names two ways out: `/harness-resume` continues from
+  the step after the last completed one without re-running them, and
+  `/harness-delivery` delivers what is already verified. The resume deliberately
+  skips the orchestrator: re-running the workflow from the top would re-derive
+  the task from scratch, and since REQ-011 the router holds no tools, so it can
+  only carry the issue number it reads in the task text — which is how a stalled
+  run used to reach delivery asking to have an issue created for work that
+  already had one. While a stop is recorded, a plain message is refused with
+  both exits named instead of silently re-running everything; `/harness-run` is
+  a third exit, since it starts a new task, and abandons the stopped run
+  explicitly rather than letting the new run overwrite the record. All three
+  clear it. With `auto_harness` off the harness only reports the stop and lets
+  the message through, because that message is the user's and nothing would
+  have turned it into a pipeline. The state is written with `pi.appendEntry()`
+  and read back from the active branch, so it survives `/reload` without
+  entering the model context; a resume is exempt from the blocking preflight,
+  whose blocker would otherwise be the very partial work being resumed, and a
+  retried step is judged on its own decision rather than inheriting one from the
+  attempt that failed.
 - **A step reads Engram before it works, not only after.** The write side was
   mandatory and the read side was nowhere: every Engram mention in the prompt
   templates was a `mem_save`, so three agents paid to write memories that no

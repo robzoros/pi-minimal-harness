@@ -7,6 +7,7 @@
  *   /harness-mode     pick the default workflow mode (menu or direct argument)
  *   /harness-model    pick an agent model and effort from Pi's catalog (menu or arguments)
  *   /harness-run      run a task through the workflow pipeline (forced sequence)
+ *   /harness-resume   continue the pipeline that stopped with steps left
  *   /harness-delivery deliver the current changes without changing workflow mode
  *   /harness-auto     show/toggle auto-harness (plain requests run the pipeline)
  *
@@ -48,6 +49,15 @@ const ARCHITECT_AGENT = "architect";
 const DELIVERY_AGENT = "delivery";
 const MODE_IDS = MODES.map((m) => m.id);
 const REQUIRED_AGENTS = ["architect", "orchestrator", "explorer", "critic", "implementer", "delivery"];
+/**
+ * How many times a step whose turn ended in a model error is retried (REQ-016).
+ * One is the whole point: a transient provider failure is the common cause and
+ * one turn is cheap against stopping a run that already holds implemented work.
+ * Not a config key — the requirement asks for a bound, not for a knob, and an
+ * adopter who retries harder usually wants a different workflow, not a bigger
+ * number.
+ */
+const STEP_RETRY_LIMIT = 1;
 const STATUS_KEY = "corpustory-harness-mode";
 const DISPATCH_WIDGET_KEY = "corpustory-harness-dispatch";
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -143,6 +153,91 @@ export function readDesignSessionFromBranch(
     return (entry.data as DesignSessionEntry | undefined)?.open === true;
   }
   return false;
+}
+
+/**
+ * A pipeline that stopped with steps left, so the work in the tree has a way
+ * forward (REQ-016). Same durable slot and same scan as the design session: the
+ * entry is written with `appendEntry` and read back from the active branch, so
+ * it survives a `/reload` without ever entering the model context.
+ *
+ * `steps` is stored rather than re-derived from `mode`, because two paths make
+ * the workflow a stop was running no longer the one `mode` names: `ANSWER_ONLY`
+ * routing replaces the list mid-run, and the single-agent commands run with
+ * `agentOverride`, which ignores `workflows.<mode>.steps` entirely.
+ */
+const PIPELINE_ENTRY_TYPE = "pi-minimal-harness:stopped-pipeline";
+
+export interface StoppedPipeline {
+  mode: string;
+  task: string;
+  steps: string[];
+  completed: string[];
+  /** The step the run stopped on; the one `/harness-resume` starts at. */
+  failedStep: string;
+}
+
+interface StoppedPipelineEntry extends StoppedPipeline {
+  stopped: boolean;
+}
+
+/**
+ * Record a stopped pipeline, or clear the record when called with nothing.
+ *
+ * The clear is an entry too, not a deletion: a branch is append-only and may
+ * carry the history of every run that touched it, so only the last entry of
+ * ours counts.
+ */
+export function writeStoppedPipeline(pi: ExtensionAPI, state?: StoppedPipeline): void {
+  try {
+    pi.appendEntry<StoppedPipelineEntry>(PIPELINE_ENTRY_TYPE, state ? { stopped: true, ...state } : { stopped: false } as StoppedPipelineEntry);
+  } catch {
+    // best effort: the pipeline stops either way; without the entry the only
+    // loss is `/harness-resume`, which reports nothing to resume.
+  }
+}
+
+/**
+ * The pipeline stopped with steps left, or null when none did. The last entry
+ * of ours wins, so a resumed or delivered run cannot leave a stale stop behind.
+ *
+ * Malformed entries read as "no stop": this is called from the `input` hook,
+ * where a thrown error would take the whole turn down.
+ */
+export function readStoppedPipelineFromBranch(
+  branch: { type?: string; customType?: string; data?: unknown }[],
+): StoppedPipeline | null {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry?.type !== "custom" || entry.customType !== PIPELINE_ENTRY_TYPE) continue;
+    const data = entry.data as Partial<StoppedPipelineEntry> | undefined;
+    if (!data || data.stopped !== true) return null;
+    const { mode, task, steps, completed } = data;
+    if (
+      typeof mode !== "string" ||
+      typeof task !== "string" ||
+      !Array.isArray(steps) ||
+      !Array.isArray(completed) ||
+      !steps.every((s) => typeof s === "string") ||
+      !completed.every((s) => typeof s === "string")
+    ) {
+      return null;
+    }
+    // The resume point is derived, never trusted: the next step after the last
+    // one that completed, clamped into the stored list.
+    const failedStep = steps[Math.min(completed.length, steps.length - 1)];
+    return { mode, task, steps: [...steps], completed: [...completed], failedStep };
+  }
+  return null;
+}
+
+/** The stopped pipeline on the current branch, or null. Never throws. */
+function currentStoppedPipeline(ctx: ExtensionContext): StoppedPipeline | null {
+  try {
+    return readStoppedPipelineFromBranch(ctx.sessionManager.getBranch());
+  } catch {
+    return null;
+  }
 }
 
 export type CheckResult = "passed" | "failed" | "skipped";
@@ -1392,6 +1487,21 @@ export function formatBlockingPreflight(state: RepositoryState): string[] {
 }
 
 /**
+ * Continue a stopped pipeline from the step after the last one that completed.
+ * One object rather than two more positional parameters: `runPipeline` is
+ * exported and has five call sites, and `undefined`-padding a caller to reach
+ * the last parameter is how the wrong argument gets passed.
+ */
+export interface ResumeState {
+  /** Index of the step to start at; derived from `completed` when omitted. */
+  startAt?: number;
+  /** The steps that already completed, in order. */
+  completed: string[];
+  /** The step list the stopped run was executing, when it is not the mode's. */
+  steps?: string[];
+}
+
+/**
  * Execute the configured workflow pipeline for `task`, step by step.
  * The runtime sequences the steps: each agent's prompt is sent as the next
  * user turn and the driver waits for it to finish before continuing.
@@ -1403,6 +1513,7 @@ export async function runPipeline(
   waitForTurn: () => Promise<void>,
   modeOverride?: string,
   agentOverride?: string,
+  resume?: ResumeState,
 ): Promise<void> {
   const configPath = await resolveConfigPath(ctx.cwd);
   if (!configPath) {
@@ -1417,7 +1528,7 @@ export async function runPipeline(
   }
   // Not const: routing replaces the remaining steps with the analysis workflow,
 // so a task that started in `full` can land on `architect` and nothing else.
-let steps = agentOverride ? [agentOverride] : getWorkflowSteps(lines, mode);
+let steps = resume?.steps ?? (agentOverride ? [agentOverride] : getWorkflowSteps(lines, mode));
 if (!steps || steps.length === 0) {
   ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
   return;
@@ -1435,6 +1546,12 @@ if (!steps || steps.length === 0) {
   // Resolved once: the gate is asked at most one time per pipeline, so a step
   // that dirties the tree itself does not block the next one.
   let pendingPreflightBlock = preflightPolicy(lines) === "blocking" ? formatBlockingPreflight(repositoryState) : [];
+  // A resume is exempt (REQ-016). The uncommitted state the blocking gate
+  // refuses is, on a resume, the very work the run stopped on: gating the
+  // resumed step on it would refuse the recovery the user just asked for. The
+  // advisory warning above still fires, so the dirty tree is never hidden.
+  if (resume) pendingPreflightBlock = [];
+  const startAt = resume ? Math.min(Math.max(resume.startAt ?? resume.completed.length, 0), steps.length) : 0;
   lastDecision = null;
   lastDecisionReason = "";
   lastReport = null;
@@ -1446,7 +1563,10 @@ if (!steps || steps.length === 0) {
   let shortCircuited = false;
   let reportMissing = false;
   let blockedByCritic = false;
-  const completed: string[] = [];
+  // Seeded with the steps a resumed run already completed, so the end-of-run
+  // summary and the completion test describe the whole workflow rather than
+  // only the tail this invocation ran.
+  const completed: string[] = [...(resume?.completed ?? [])];
   // The reply of the previous step, quoted into the next step's prompt: the
   // handoff a step is told to expect has to be reachable from its own prompt,
   // not only from the transcript the agent happens to see.
@@ -1460,10 +1580,16 @@ if (!steps || steps.length === 0) {
   let expectedPaths: string[] | null = null;
   let planDiscrepancy: string | null = null;
 
+  if (startAt > 0) {
+    ctx.ui.notify(
+      `Resuming "${mode}" at step ${startAt + 1} (${steps[startAt]}): ${completed.join(" -> ")} already completed.`,
+      "info",
+    );
+  }
   ctx.ui.notify(`Pipeline "${mode}": ${steps.length} steps — ${steps.join(" -> ")}`, "info");
 
   try {
-    for (let i = 0; i < steps.length; i++) {
+    for (let i = startAt; i < steps.length; i++) {
       const agentName = steps[i];
       // Per step, never inherited: the previous step's decision and report
       // belong to it. The report is dropped again before the next step, but the
@@ -1611,11 +1737,39 @@ if (!steps || steps.length === 0) {
         );
       }
       if (skillBodies.length > 0) stepMessage.push("Project skill(s) for this step:", ...skillBodies);
+      // A resumed step is told where it stands. Without this it receives
+      // `{{previous}}: none`, which is false for a step resuming at 3/5, and it
+      // has no way to know the earlier steps ran and must not be redone.
+      if (resume && resume.completed.length > 0) {
+        stepMessage.push(
+          `Resuming a stopped pipeline — already completed: ${resume.completed.join(" -> ")}. ` +
+            `Continue from this step; do not redo the completed steps.`,
+        );
+      }
       stepMessage.push(`Task: ${task}`);
-      pi.sendUserMessage(stepMessage.join("\n"));
-      await waitForTurn();
 
-      const turn = lastAssistantTurn(ctx);
+      // REQ-016: a step whose turn ended in a model error is retried once. The
+      // common cause is a transient provider failure, and one turn is cheaper
+      // than stopping a run that already holds implemented work. The retry is
+      // announced because it costs the user a turn they did not ask for, and it
+      // re-sends the same step message: the step is unchanged, only its turn is.
+      // An abort is not retried — the user asked for it to stop.
+      let turn: LastTurn | null = null;
+      for (let attempt = 0; ; attempt++) {
+        // Per attempt, not per step: a decision recorded by an attempt that then
+        // failed must not be read as the successful retry's own. The hook only
+        // writes when the slot is empty, so without this it would survive.
+        lastDecision = null;
+        pi.sendUserMessage(stepMessage.join("\n"));
+        await waitForTurn();
+        turn = lastAssistantTurn(ctx);
+        if (turn?.stopReason !== "error" || attempt >= STEP_RETRY_LIMIT) break;
+        ctx.ui.notify(
+          `Step ${i + 1} (${agentName}) failed: ${turn.errorMessage ?? "model error"}. ` +
+            `Retrying it once (attempt ${attempt + 2}/${STEP_RETRY_LIMIT + 1}).`,
+          "warning",
+        );
+      }
       if (turn?.stopReason === "aborted") {
         ctx.ui.notify(`Pipeline aborted by user at step ${i + 1} (${agentName}).`, "warning");
         break;
@@ -1624,6 +1778,8 @@ if (!steps || steps.length === 0) {
         ctx.ui.notify(`Pipeline failed at step ${i + 1} (${agentName}): ${turn.errorMessage ?? "model error"}`, "error");
         break;
       }
+      // Outside the retry loop on purpose: a step is recorded once, by the
+      // attempt that actually finished it.
       completed.push(agentName);
       previousStepOutput = turn?.text ?? null;
 
@@ -1773,23 +1929,46 @@ if (!steps || steps.length === 0) {
   }
 
   if (completed.length === steps.length) {
+    // A finished run must not leave a stop behind, or the input hook would keep
+    // offering to resume a pipeline that is already over.
+    writeStoppedPipeline(pi);
     if (reportMissing) {
+      // No steps are left, so there is nothing to resume — but the tree may
+      // still hold undelivered work, and the delivery agent is the only command
+      // that can act on it. Name it rather than leaving "stopped early" as the
+      // last word.
       ctx.ui.notify(
-        `Pipeline "${mode}" finished, but a step's report is missing — the last agent may have stopped early.`,
+        `Pipeline "${mode}" finished, but a step's report is missing — the last agent may have stopped early. ` +
+          "There is nothing to resume; use /harness-delivery to deliver what is already verified.",
         "warning",
       );
     } else {
       ctx.ui.notify(`Pipeline "${mode}" finished: ${completed.join(" -> ")}`, "info");
     }
   } else if (shortCircuited) {
+    // A direct answer is a finished run, not an interruption: nothing is left
+    // in the tree and there is nothing to resume.
+    writeStoppedPipeline(pi);
     ctx.ui.notify(`Pipeline "${mode}": orchestrator answered directly — remaining steps skipped.`, "info");
   } else if (blockedByCritic) {
+    // Also terminal, and deliberately not resumable: the critic's report is the
+    // answer, and resuming would re-run the very steps the verdict refused.
+    writeStoppedPipeline(pi);
     ctx.ui.notify(
       `Pipeline "${mode}": critic verdict BLOCKED — stopped before the file-mutating steps; the critic report is the final answer.`,
       "warning",
     );
   } else {
-    ctx.ui.notify(`Pipeline "${mode}" stopped after ${completed.length}/${steps.length} steps.`, "warning");
+    // REQ-016: the run stopped with steps left, so the work already in the tree
+    // needs a way forward. Recording it here — every exit that is neither a
+    // completion nor a deliberate terminal answer lands here.
+    const failedStep = steps[Math.min(completed.length, steps.length - 1)];
+    writeStoppedPipeline(pi, { mode, task, steps: [...steps], completed: [...completed], failedStep });
+    ctx.ui.notify(
+      `Pipeline "${mode}" stopped at step ${completed.length + 1} (${failedStep}) after ${completed.length}/${steps.length} steps. ` +
+        "The tree holds partial work. Use /harness-resume to continue from this step, or /harness-delivery to deliver what is already verified.",
+      "warning",
+    );
   }
 }
 
@@ -2786,6 +2965,44 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     if (pipelineRunning) return { action: "continue" };
     const task = event.text.trim();
     if (!task || task.startsWith("/")) return { action: "continue" };
+    // The configuration is read once here rather than only in the auto-harness
+    // branch below: the stopped-pipeline guard needs `auto_harness` to know
+    // whether eating a plain message is its job or the model's. `null` means the
+    // configuration could not be read, which keeps the previous behaviour rather
+    // than silently swallowing a message on a guess.
+    let autoHarness: boolean | null = null;
+    try {
+      const configPath = await resolveConfigPath(ctx.cwd);
+      if (configPath) autoHarness = isAutoHarness(await readLines(configPath));
+    } catch {
+      autoHarness = null;
+    }
+    // REQ-016: a pipeline stopped with steps left is answered before this one
+    // starts. Re-running the workflow from the orchestrator would throw away the
+    // completed steps and — since the router holds no tools (REQ-011) — reach
+    // delivery without the issue the original run carried. So the plain request
+    // is not silently turned into a fresh run; the two ways forward are named
+    // instead. Both clear the record when they are taken, so this never traps
+    // the user. Ahead of the architect session: a stopped run is unfinished
+    // work, which outranks a design conversation.
+    const stopped = currentStoppedPipeline(ctx);
+    if (stopped) {
+      const detail =
+        `A pipeline stopped at "${stopped.failedStep}" (${stopped.completed.length}/${stopped.steps.length} steps done) and the tree holds its partial work. ` +
+        "Use /harness-resume to continue it, or /harness-delivery to deliver what is already verified.";
+      // Consuming the message is this guard's job only when auto-harness would
+      // otherwise have turned it into a new pipeline. With `/harness-auto off`
+      // a plain message is the user's to send to the model, so the stop is
+      // reported and the message goes through — reporting it is useful either
+      // way, eating it is not this harness's business when nothing would have
+      // replaced it with a pipeline.
+      if (autoHarness === null || autoHarness) {
+        ctx.ui.notify(`${detail} Your message was not sent to a new pipeline.`, "warning");
+        return { action: "handled" };
+      }
+      ctx.ui.notify(detail, "warning");
+      return { action: "continue" };
+    }
     // Sticky architect session: the user keeps talking to the architect, so the
     // orchestrator does not route again. Checked after the slash-command guard
     // so /harness-mode and the rest still reach their own commands, and after
@@ -2800,10 +3017,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       return { action: "handled" };
     }
     try {
-      const configPath = await resolveConfigPath(ctx.cwd);
-      if (!configPath) return { action: "continue" };
-      const lines = await readLines(configPath);
-      if (!isAutoHarness(lines)) return { action: "continue" };
+      if (autoHarness !== true) return { action: "continue" };
       pipelineRunning = true;
       void runPipeline(pi, ctx, task, () => pollIdle(ctx))
         .catch((error) => ctx.ui.notify(`harness pipeline failed: ${String(error)}`, "error"))
@@ -2903,6 +3117,20 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         ctx.ui.notify("A harness pipeline is already running.", "warning");
         return;
       }
+      // A forced run starts a new task from step 0, so it cannot inherit the
+      // stopped pipeline this command would otherwise leave recorded: if the new
+      // run also stopped, it would overwrite the record and the earlier run's
+      // completed steps would be lost with no way back. Say so rather than
+      // discarding it silently.
+      const abandoned = currentStoppedPipeline(ctx);
+      if (abandoned) {
+        writeStoppedPipeline(pi);
+        ctx.ui.notify(
+          `Abandoning the pipeline stopped at "${abandoned.failedStep}" (${abandoned.completed.length}/${abandoned.steps.length} steps done): ` +
+            "this run starts a new task. Use /harness-resume instead to continue it.",
+          "warning",
+        );
+      }
       pipelineRunning = true;
       try {
         await runPipeline(pi, ctx, task, () => ctx.waitForIdle());
@@ -2962,6 +3190,45 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("harness-resume", {
+    description: "Continue the pipeline that stopped with steps left, without re-running the completed ones",
+    handler: async (args, ctx) => {
+      if (!requireUI(ctx)) return;
+      if (pipelineRunning) {
+        ctx.ui.notify("A harness pipeline is already running.", "warning");
+        return;
+      }
+      const stopped = currentStoppedPipeline(ctx);
+      if (!stopped) {
+        ctx.ui.notify("No pipeline is waiting to be resumed.", "info");
+        return;
+      }
+      // Cleared up front, not on success: a resumed run that stops again
+      // rewrites the record itself, and a user who abandons the resume must not
+      // be left with a stop they can neither resume nor clear.
+      writeStoppedPipeline(pi);
+      if (stopped.completed.length === 0) {
+        ctx.ui.notify(
+          `The stopped pipeline had completed no steps, so there is nothing to continue — re-running the task from "${stopped.task}".`,
+          "warning",
+        );
+      }
+      const note = args.trim();
+      pipelineRunning = true;
+      try {
+        await runPipeline(pi, ctx, note ? `${stopped.task}\n\nNote for the remaining steps: ${note}` : stopped.task, () => ctx.waitForIdle(), stopped.mode, undefined, {
+          startAt: stopped.completed.length,
+          completed: stopped.completed,
+          steps: stopped.steps,
+        });
+      } catch (error) {
+        ctx.ui.notify(`Resume failed: ${String(error)}`, "error");
+      } finally {
+        pipelineRunning = false;
+      }
+    },
+  });
+
   pi.registerCommand("harness-delivery", {
     description: "Run the delivery agent without changing defaults.workflow_mode",
     handler: async (args, ctx) => {
@@ -2970,6 +3237,11 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         ctx.ui.notify("A harness pipeline is already running.", "warning");
         return;
       }
+      // This command is one of the two exits a stopped pipeline offers, so
+      // taking it consumes the stop. Without this the record would outlive the
+      // work it described and the input hook would keep pointing at a resume
+      // with nothing left to resume.
+      writeStoppedPipeline(pi);
       const task = args.trim() || "Deliver the current verified changes.";
       pipelineRunning = true;
       try {
