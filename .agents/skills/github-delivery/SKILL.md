@@ -23,11 +23,12 @@ Before delivery:
   handoff (or the task). If it is missing, ask the user to authorize creating
   it and stop; if the user denies, report the denial as the reason delivery did
   not happen;
-- the work must sit on a branch you may deliver from. Creating a fresh branch
-  from the base branch, named after the change, is the default and needs no
-  permission. Ask the user which branch to use when the work already sits on a
-  branch whose pull request is open or was reviewed, or when the target branch
-  is otherwise a choice you cannot make;
+- the work must sit on a branch you may deliver from. **The branch rule is
+  stated once, in `prompts/delivery.md` step 2** — a fresh branch from the base,
+  never rewriting one already reviewed or merged, and asking the user when the
+  branch is a choice you cannot make. This skill follows it and does not
+  restate it, so the rule cannot drift between a harness-owned file that `update`
+  replaces and a project-owned one that it does not;
 - a `CHANGELOG.md` entry must already exist when the change needs one. You have
   no file-editing tools: report a missing entry instead of writing it.
 
@@ -67,7 +68,8 @@ not begin the procedure until both are settled.
 1. Inspect repository state with `git status`.
 2. Confirm the intended changed files.
 3. Check existing branches and choose a short English branch name.
-4. Create the branch before committing when the work is still on the base branch.
+4. Create the branch before committing when the work is still on the base branch,
+   following the rule in `prompts/delivery.md` step 2.
 5. Stage only the intended files.
 6. Commit using the repository's Conventional Commits convention.
 7. Push the branch to `origin`.

@@ -52,8 +52,9 @@ Responsibilities:
 - prepare the handoff for the next step;
 - decide whether Engram should be queried (OpenSpec is the explorer's and the
   critic's tool, not the orchestrator's);
-- identify (or create) the single issue the work closes, when the repository
-  requires issue-linked pull requests;
+- identify which of the repository's own rules, already injected, apply to the
+  task;
+- carry the issue the architect created, or `none`;
 - preserve the user's intent without over-expanding the task.
 
 Expected output:
@@ -84,11 +85,13 @@ Responsibilities:
 It owes **no** structured report: it converses, and a report owed on every chat
 turn is the opposite of a chat.
 
-The session is the architect's to control: it calls `harness_session(START)`
-when the user wants to keep designing, and `harness_session(END)` when they are
-done. While it is open, the user's next plain messages go straight to the
-architect and skip the orchestrator. The router never arms it, so an ordinary
-question gets a single architect turn and cannot trap the user in a session.
+The session is not a model's to control. An architect step opens it implicitly —
+if the agent that just ran is the architect, the conversation *is* a design
+session — and only `/harness-end` closes it. Nothing in the model opens or closes
+it, so a model that simply forgets cannot hand the conversation back to the
+orchestrator. While it is open, the user's next plain messages go straight to
+the architect and skip the orchestrator. The state is persisted with
+`pi.appendEntry()` and restored in `session_start`, so a reload does not lose it.
 
 ### 3. Explorer Agent
 

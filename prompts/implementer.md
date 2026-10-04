@@ -71,6 +71,14 @@ paths you actually changed), `checks` (the checks you actually ran, with
 `notes` (`""` when there is nothing; what delivery must know) and `lessons`
 (what is worth reusing — the findings you also saved with `mem_save` when
 Engram is available, otherwise the same findings; `[]` when there are none).
+
+**`checks` holds command lines, not descriptions.** Before delivery the harness
+re-runs every command you list, verbatim, in the project root. A description of
+what you did — "rendered the prompt and read it", "inspected the diff" — is not a
+command, so the re-run fails and delivery stops with your own report as the reason.
+If you verified something without a command, say so in `notes`, which delivery
+reads. This is the single most common way a correct implementation fails to
+deliver.
 All four fields are required: a report missing one of them is incomplete and
 the harness sends you a repair turn. A dispatched background subagent has no
 pipeline: deliver the report as your final message and do not rely on the

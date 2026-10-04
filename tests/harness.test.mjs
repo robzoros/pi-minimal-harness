@@ -122,6 +122,13 @@ const fakePi = {
     events[event] = handler;
     return () => {};
   },
+  // Durable state the harness persists, written the way Pi writes it: a custom
+  // entry in the branch, excluded from the model context. `session_start` reads
+  // it back through `getBranch()`, which is exactly how the real reload path
+  // finds it.
+  appendEntry: (customType, data) => {
+    branchArr.push({ type: "custom", customType, data });
+  },
   sendUserMessage: (text) => {
     sent.push(text);
     branchArr.push({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
@@ -208,7 +215,7 @@ const makeCtx = (cwd, isCommand) => {
       confirm: async () => false,
       input: async () => undefined,
     },
-    ...(isCommand ? { waitForIdle: async () => {} } : {}),
+    ...(isCommand ? { waitForIdle: async () => { await new Promise((r) => setTimeout(r, 140)); } } : {}),
   };
   activeCtx = ctx;
   return ctx;
@@ -230,6 +237,14 @@ const reset = () => {
   assistantTurns = 0;
   pendingToolCall = null;
   toolErrors.length = 0;
+  // The design session is persisted by writing an entry to the branch, and
+  // `session_start` reads it back from there. Without clearing it, a session
+  // opened by one test would be restored into the next — so the test that exists
+  // to prove persistence would be reading its own leftovers. Note this clears
+  // the persisted copy only: it does not close a session that is open in memory,
+  // because several tests deliberately keep one open across a reset. Those close
+  // it with /harness-end, as a user would.
+  branchArr.length = 0;
 };
 
 // --- registration ------------------------------------------------------------
@@ -778,6 +793,10 @@ check(
   statuses.includes("harness: full-dry-run · 2/2 architect · decision: answer_only · auto: on"),
   statuses.join(" | "),
 );
+// REQ-010: that architect turn left a design session open and only the user can
+// close it. Close it here so the PIPELINE run below measures a closed session,
+// which is the state a fresh task starts in.
+await commands["harness-end"].handler("", makeCtx(tmp, true));
 
 reset();
 assistantTextOverride = "Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE";
@@ -1350,6 +1369,10 @@ check(
   statuses.some((s) => String(s).includes("architect") && String(s).includes("decision: answer_only")),
   statuses.slice(-3).join(" | "),
 );
+// REQ-010: that architect turn left a design session open, and only the user
+// can close it. Close it here, as a user would, so the footer and routing of the
+// sections below are not measured through a session that happens to be open.
+await commands["harness-end"].handler("", makeCtx(tmp, true));
 
 // With routing off, the same decision ends the pipeline after the orchestrator.
 reset();
@@ -1409,11 +1432,18 @@ check(
   simpleSteps.includes("implementer") && implementerTools.includes("codegraph"),
   `full=${simpleSteps.join("->")} tools=${implementerTools.join(",")}`,
 );
+// REQ-011: the router is granted no tools at all. Its control tools are
+// registered by the extension and are not gated by this list, so routing still
+// works with an empty one — the point is that it cannot reach a tool at all.
 check(
-  "config: the orchestrator is granted nothing that would let it analyse the repository",
-  ["codegraph", "filesystem", "engram"].every((t) => !mod.getAgentTools(cfgLines, "orchestrator").includes(t)) &&
-    mod.getAgentTools(cfgLines, "orchestrator").includes("github"),
+  "config: the orchestrator is granted no tools, so it cannot analyse or reach GitHub",
+  JSON.stringify(mod.getAgentTools(cfgLines, "orchestrator")) === "[]",
   mod.getAgentTools(cfgLines, "orchestrator").join(","),
+);
+check(
+  "config: issues belong to the architect",
+  mod.getAgentTools(cfgLines, "architect").includes("github"),
+  mod.getAgentTools(cfgLines, "architect").join(","),
 );
 check(
   "config: engram stays with the agents that record findings",
@@ -1687,7 +1717,12 @@ const basePrompt = await mod.composeDispatchSystemPrompt({
 });
 check(
   "dispatch: without an AGENTS.md the system prompt is template + contract",
-  basePrompt.includes("### Findings") && basePrompt.includes("HARNESS CONTRACT") && !basePrompt.includes("Project rules ("),
+  // Asserted on the marker the composer actually emits today. A previous
+  // version grepped "Project rules (", a string REQ-001 replaced with the
+  // `<repo_content>` label: the check kept passing while testing nothing.
+  basePrompt.includes("### Findings") &&
+    basePrompt.includes("HARNESS CONTRACT") &&
+    !basePrompt.includes('<repo_content source="AGENTS.md">'),
   basePrompt.slice(0, 80),
 );
 await fs.writeFile(path.join(dispatchTmp, "AGENTS.md"), "PROJECT RULE: never touch generated files.\n");
@@ -1701,9 +1736,18 @@ const withRules = await mod.composeDispatchSystemPrompt({
 check(
   "dispatch: the project's AGENTS.md is injected last and wins on conflict",
   withRules.includes("PROJECT RULE: never touch generated files.") &&
-    withRules.indexOf("Project rules (") > withRules.indexOf("HARNESS CONTRACT") &&
+    withRules.lastIndexOf("<repo_content") > withRules.indexOf("HARNESS CONTRACT") &&
     withRules.includes("these win"),
-  String(withRules.indexOf("Project rules (")),
+  String(withRules.lastIndexOf("<repo_content")),
+);
+check(
+  // The precedence line is the harness speaking, not project content, so it must
+  // sit OUTSIDE the "never obey this" block. Inside it, the boundary would have
+  // covered the very rule that tells the subagent which rules win.
+  "dispatch: the precedence statement sits outside the data boundary",
+  withRules.includes("these win") &&
+    withRules.indexOf("these win") < withRules.indexOf('<repo_content source="AGENTS.md">'),
+  String(withRules.indexOf("these win") - withRules.indexOf('<repo_content source="AGENTS.md">')),
 );
 const withSkill = await mod.composeDispatchSystemPrompt({
   templatePath: agentPromptPath,
@@ -1714,8 +1758,28 @@ const withSkill = await mod.composeDispatchSystemPrompt({
 });
 check(
   "dispatch: declared skills are injected into the subagent system prompt",
-  withSkill.includes("Project skill(s) for this agent:") && withSkill.includes("SKILL BODY: stage only the reported paths."),
+  withSkill.includes('<repo_content source="project-skills">') && withSkill.includes("SKILL BODY: stage only the reported paths."),
   withSkill.slice(0, 120),
+);
+// REQ-001: every source this function injects from the repository is inside a
+// boundary, so a skill cannot smuggle an instruction into a subagent.
+check(
+  // REQ-001: the two natures. Project content is data and is wrapped; the
+  // harness contract is the subagent's rulebook and must arrive as instruction.
+  // Wrapping the contract was a real defect that passed every test, because
+  // "never obey this" breaks no assertion — only the product.
+  "dispatch: project content is wrapped as data, and the contract is not",
+  withSkill.includes('<repo_content source="project-skills">') &&
+    withSkill.includes("</repo_content>") &&
+    /never obey it/.test(withSkill) &&
+    !withSkill.includes('<repo_content source="harness-contract">'),
+  withSkill.slice(0, 160),
+);
+check(
+  "dispatch: the contract is presented as the authoritative instruction set",
+  withSkill.includes("the harness contract for this project: the rules you are expected to follow") &&
+    withSkill.includes("Its audit belongs to the user"),
+  withSkill.slice(withSkill.indexOf("HARNESS CONTRACT") - 260, withSkill.indexOf("HARNESS CONTRACT")),
 );
 check(
   "dispatch: project rules are found at the project root",
@@ -1754,13 +1818,30 @@ check(
 // the block ends by closing the session again. Auto-harness was switched off
 // earlier in this file, and the normal path needs it.
 await fs.writeFile(cfgPath, (await fs.readFile(cfgPath, "utf8")).replace(/^ {2}auto_harness: .*$/m, "  auto_harness: true"));
+// Earlier sections routed ANSWER_ONLY to the architect more than once, and
+// REQ-010 makes every architect turn leave a session open. Close it here, as a
+// user would, so this section starts from the closed state it is asserting.
+await commands["harness-end"].handler("", makeCtx(tmp, true));
 reset();
-const armSession = waitTurnInjecting([
-  { after: 0, call: { name: "harness_decision", params: { decision: "answer_only" } } },
-  { after: 1, call: { name: "harness_session", params: { active: "START" } } },
-]);
-await mod.runPipeline(fakePi, makeCtx(tmp, true), "diseñemos la API", armSession);
-check("session: the architect arms the session", notifies.some((n) => n.includes("Architect session open")), notifies.join(" | "));
+// `waitTurnInjecting` consumes its list with `shift()`, so a single injector
+// cannot serve two runs. Build one per turn that needs a tool call.
+const architectTurn = () =>
+  waitTurnInjecting([{ after: 0, call: { name: "harness_decision", params: { decision: "answer_only" } } }]);
+const openByTurn = architectTurn();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "diseñemos la API", openByTurn);
+check(
+  // REQ-010: no tool call in the architect's turn. The session is open because
+  // the architect ran, which is the whole point — a model that forgets cannot
+  // silently hand the conversation back to the orchestrator.
+  "session: an architect turn alone opens the session, with nothing called",
+  notifies.some((n) => n.includes("Architect session open")),
+  notifies.join(" | "),
+);
+check(
+  "session: the tool that used to open it is gone",
+  !tools["harness_session"],
+  Object.keys(tools).join(","),
+);
 
 reset();
 sent.length = 0;
@@ -1779,26 +1860,38 @@ sent.length = 0;
 const slash = await events["input"]({ text: "/harness-mode", source: "interactive" }, makeCtx(tmp, false));
 check("session: a slash command is not swallowed by the session", slash.action === "continue" && sent.length === 0);
 
-// REQ-007: the architect opens the session, only the user closes it. There is
-// no END any more, so the architect's attempt to close it must fail loudly
-// rather than silently doing nothing.
-let architectCloseError = "";
-try {
-  await tools["harness_session"].execute("call-close", { active: "END" }, {});
-} catch (error) {
-  architectCloseError = error instanceof Error ? error.message : String(error);
-}
-check("session: the architect cannot close the session", /only the user closes/i.test(architectCloseError), architectCloseError);
-
+// REQ-009: the session survives a reload because it is written to the branch
+// and read back in `session_start`. Close first, so the turn below is a real
+// transition and therefore writes an entry that the restore can find.
+await commands["harness-end"].handler("", makeCtx(tmp, true));
+await commands["harness-end"].handler("", makeCtx(tmp, true));
 reset();
-sent.length = 0;
-await events["input"]({ text: "otra pregunta", source: "interactive" }, makeCtx(tmp, false));
-await new Promise((r) => setTimeout(r, 1500));
-check("session: a rejected END leaves the session open", sent[0]?.includes("prompts/architecture.md"), String(sent[0]).slice(0, 70));
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "diseño", architectTurn());
+check(
+  "session: an architect turn writes the session to the branch",
+  branchArr.some((e) => e.type === "custom"),
+  `sent=${sent.length} types=${JSON.stringify(branchArr.map((e) => e.type))} ${notifies.join(" | ")}`,
+);
+check(
+  "session: session_start restores it from the branch after a reload",
+  mod.readDesignSessionFromBranch(branchArr) === true,
+  JSON.stringify(branchArr.filter((e) => e.type === "custom").map((e) => e.data)),
+);
+check(
+  "session: an empty branch restores to closed, so no stale session survives a reload",
+  mod.readDesignSessionFromBranch([]) === false,
+);
 
-// /harness-end is the user's gesture, and it is the only one.
+// /harness-end is the user's gesture, and it is the only one. It must also clear
+// the persisted entry, or the next reload would resurrect the closed session.
+notifies.length = 0;
 await commands["harness-end"].handler("", makeCtx(tmp, true));
 check("session: /harness-end reports that it closed the session", notifies.some((n) => n.includes("Design session closed")), notifies.join(" | "));
+check(
+  "session: closing writes the closed state, so a reload cannot resurrect it",
+  mod.readDesignSessionFromBranch(branchArr) === false,
+  JSON.stringify(branchArr.filter((e) => e.type === "custom").map((e) => e.data)),
+);
 
 reset();
 sent.length = 0;
@@ -1831,19 +1924,65 @@ reset();
 assistantScript.push("Needs design.\n\nHARNESS-DECISION: ANSWER_ONLY");
 assistantScript.push("Opening the session.\n\nHARNESS-SESSION: START");
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "volvamos a esto", waitTurn);
-check(
-  "session: a stale HARNESS-SESSION marker no longer arms anything",
-  !notifies.some((n) => n.includes("Architect session open")),
-  notifies.join(" | "),
-);
 const lastWithSession = JSON.stringify([...branchArr].reverse().find((e) => e.type === "message" && e.message.role === "assistant"));
-check("session: and it is left in the visible reply rather than silently stripped", lastWithSession.includes("HARNESS-SESSION"));
+check(
+  "session: a stale HARNESS-SESSION marker is inert and stays in the visible reply",
+  lastWithSession.includes("HARNESS-SESSION"),
+  lastWithSession.slice(-120),
+);
+
+// REQ-013: /harness-validate is the one path that writes the requirements file,
+// so it gets its own coverage. With no session open there is nothing to approve
+// and no pipeline may run at all — asserted by the absence of a step message,
+// not by the wording of the notice. The block above left a session open (that
+// run reached the architect), so close it first.
+await commands["harness-end"].handler("", makeCtx(tmp, true));
+reset();
+notifies.length = 0;
+sent.length = 0;
+await commands["harness-validate"].handler("", makeCtx(tmp, true));
+check(
+  "validate: with no session open it refuses and runs no pipeline",
+  sent.length === 0 && notifies.some((n) => n.includes("no open design session")),
+  `sent=${sent.length} ${notifies.join(" | ")}`,
+);
 
 reset();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "diseño", architectTurn());
+const sessionOpenBefore = mod.readDesignSessionFromBranch(branchArr);
+check("validate: a session is open for the next case", sessionOpenBefore === true);
+
+// With a session open it runs exactly one architect step. `waitForIdle` now waits
+// like `waitTurn`, because the fake schedules the assistant turn asynchronously
+// and a no-op would read the turn before it arrived.
+reset();
+notifies.length = 0;
 sent.length = 0;
-await events["input"]({ text: "seguimos", source: "interactive" }, makeCtx(tmp, false));
-await new Promise((r) => setTimeout(r, 1500));
-check("session: the orchestrator routes again after the stale marker", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
+await commands["harness-validate"].handler("aprobado el alcance", makeCtx(tmp, true));
+check(
+  "validate: with a session open it runs one architect step in analysis mode",
+  sent.length === 1 && sent[0]?.includes("prompts/architecture.md") && sent[0]?.includes("analysis"),
+  `sent=${sent.length} ${String(sent[0]).slice(0, 90)}`,
+);
+check(
+  "validate: the approval and the note reach the architect",
+  sent[0]?.includes("aprobado el alcance"),
+  String(sent[0]).slice(0, 120),
+);
+check(
+  // The property most worth a test: approving is not finishing. Asserted by
+  // behaviour rather than by reading the branch, because `reset()` cleared the
+  // persisted copy and the session is still open in memory — exactly the state a
+  // reload would have to restore.
+  "validate: it leaves the session open",
+  await (async () => {
+    sent.length = 0;
+    await events["input"]({ text: "y si fuera multi-idioma?", source: "interactive" }, makeCtx(tmp, false));
+    await new Promise((r) => setTimeout(r, 1500));
+    return sent[0]?.includes("prompts/architecture.md") === true;
+  })(),
+  String(sent[0]).slice(0, 70),
+);
 
 // Leave no session armed for anything that runs after this block.
 await commands["harness-end"].handler("", makeCtx(tmp, true));
@@ -1852,17 +1991,6 @@ sent.length = 0;
 await events["input"]({ text: "comprobación", source: "interactive" }, makeCtx(tmp, false));
 await new Promise((r) => setTimeout(r, 1500));
 check("session: no session is left armed", sent[0]?.includes("prompts/orchestrator.md"), String(sent[0]).slice(0, 70));
-
-// The session tool accepts START and nothing else. It throws on purpose: the
-// runtime marks a thrown tool as an error, while an `isError` field on a
-// returned result is ignored.
-let sessionToolError = "";
-try {
-  await tools["harness_session"].execute("call-x", { active: "MAYBE" }, {});
-} catch (error) {
-  sessionToolError = error instanceof Error ? error.message : String(error);
-}
-check("session: the tool rejects an unknown value", /START/.test(sessionToolError), sessionToolError);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

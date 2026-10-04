@@ -78,14 +78,16 @@ mechanism, and the reference section above tells them to read this file.
   command starts a turn for the architect, it writes what was agreed and says
   what it wrote. There is no path that puts something in that file the user did
   not approve.
-- The architect opens its multi-turn session with the `harness_session` tool
-  (`START`); **only the user closes it**, with `/harness-end`. While the session
-  is open the user's next plain messages go straight to the architect, without
-  the orchestrator routing again. Approving a change is not finishing: the next
-  requirement may need the context of this conversation, so `/harness-validate`
-  leaves the session open. There is no model action that closes a session, so an
-  ordinary question still gets one architect turn and no trap. The architect owes
-  no structured report: it converses.
+- An architect step opens the multi-turn session implicitly; **only the user
+  closes it**, with `/harness-end`. No model action opens or closes a session:
+  if the agent that just ran is the architect, the conversation *is* a design
+  session, and a model that forgets cannot hand the conversation back to the
+  orchestrator. While the session is open the user's next plain messages go
+  straight to the architect, without the orchestrator routing again. Approving a
+  change is not finishing: the next requirement may need the context of this
+  conversation, so `/harness-validate` leaves the session open. The open state is
+  persisted with `pi.appendEntry()` and restored in `session_start`, so `/reload`
+  does not lose it. The architect owes no structured report: it converses.
 - Every other agent writes the report its own prompt template asks
   for and calls `harness_report` with `changed_files`, `checks`, `notes` and
   `lessons` (the critic also passes its `verdict`: `PROCEED`,

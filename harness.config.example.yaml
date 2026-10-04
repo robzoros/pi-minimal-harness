@@ -63,6 +63,10 @@ agents:
       # The architect sizes the work with CodeGraph while discussing it; remove
       # the line when CodeGraph is not installed.
       - codegraph
+      # Issues belong to the architect: an issue is a statement of scope, and
+      # creating one is writing the contract. It creates the issue the work
+      # closes when the user approves the requirements.
+      - github
     prompt_template: prompts/architecture.md
     responsibilities:
       - discuss_with_the_user
@@ -73,13 +77,11 @@ agents:
     model: provider/model-id
     reasoning: medium
     mutates_files: false
-    tools:
-      # The orchestrator only routes. It is granted nothing that would let it
-      # analyse the repository, because a router that can size the task spends a
-      # turn producing what the next agent does again from scratch. `github` is
-      # the exception: the handoff names the issue a pull request closes, and
-      # creating it is routing work.
-      - github
+    # The router is granted no tools at all. Its control tools (harness_decision,
+    # harness_report) are registered by the extension and are not gated by this
+    # list, so routing survives an empty one. An issue is a statement of scope,
+    # and scope belongs to the architect.
+    tools: []
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task
