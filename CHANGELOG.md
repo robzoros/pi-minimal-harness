@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A design session that survives `/reload`.** The open/closed state is written
+  with `pi.appendEntry()` — Pi's slot for durable data that must stay out of the
+  model context — and restored in `session_start`, from the active branch. A
+  reload used to rebuild the extension runtime and silently hand the conversation
+  back to the orchestrator, with `/harness-end` then reporting that no session
+  was open when one was.
+- **The branch-creation rule lives in one place.** `prompts/delivery.md` owns it;
+  the delivery skill points at it instead of restating it. `update` replaces the
+  prompt as harness-owned but not the skill, so a rule written in both could not
+  stay in step.
+- **Repository content injected into a dispatched subagent is wrapped in a
+  `<repo_content>` boundary — except the harness contract, which is
+  instruction.** The two sources a third party can write — the declared project
+  skills and the project's own `AGENTS.md` — now carry an explicit instruction to
+  read them as data and never obey them, even where they address an assistant in
+  the imperative. The contract is the one exception: it is injected
+  **unwrapped**, introduced as the rules the subagent is expected to follow,
+  because wrapping it too would tell the subagent never to obey the rules it was
+  dispatched to follow — breaking the feature rather than securing it. Its audit
+  belongs to the user of the repository, not to the subagent reading it. Content
+  an agent reads with its own tools does not pass through the harness and is out
+  of scope; it is named as such rather than left implied.
 - **`/harness-validate` and `/harness-end`.** The architect writes the
   requirements file **only when the user approves**: `/harness-validate` runs a
   one-step architect turn that writes what was agreed and reports what it wrote,
@@ -146,6 +168,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The orchestrator is granted no tools at all.** An issue is a statement of
+  scope, and scope belongs to the architect, which now creates the issue the work
+  closes when you approve the requirements. `harness_decision` and
+  `harness_report` are registered by the extension and are not gated by the
+  config's tool list, so routing is unaffected by an empty one. Its prompt also
+  stops asking for scope and risk, which was an invitation to analyse.
 - **Breaking: five workflow modes are now three.** `simple`,
   `implementation-only` and `delivery-only` are gone; what is left is `full`
   (the technical flow through GitHub delivery), `full-dry-run` (explore,
@@ -424,6 +452,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`harness_session`.** An architect step opens the design session implicitly and
+  only `/harness-end` closes it. Opening it was a model action, and that is
+  exactly what made it unreliable: a model that simply forgot left the user
+  talking to the orchestrator with nothing saying why. Three control tools become
+  two.
 - **`HARNESS-SESSION:` as a fallback.** The session is opened with a tool call
   and closed only by the user, so there is no textual fallback for either end.
   A stale `HARNESS-SESSION:` line in a reply is now inert and stays visible in

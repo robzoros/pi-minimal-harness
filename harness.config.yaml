@@ -50,13 +50,18 @@ workflows:
 
 agents:
   architect:
-    model: opencode-go/space-bunny-free
+    model: opencode-go/deepseek-v4.1-flash
     reasoning: high
     mutates_files: true
     tools:
       - filesystem
       - engram
       - codegraph
+      # Issues belong to the architect (REQ-011): an issue is a statement of
+      # scope, and creating one is writing the contract — which is exactly what
+      # REQ-007 took away from everyone else. The architect creates the issue the
+      # work closes when you approve the requirements.
+      - github
     prompt_template: prompts/architecture.md
     responsibilities:
       - discuss_with_the_user
@@ -64,15 +69,14 @@ agents:
       - maintain_the_requirements_file
       - record_findings_with_engram
   orchestrator:
-    model: opencode-go/space-bunny-free
-    reasoning: high
+    model: opencode-go/longcat-2.5-preview-free
+    reasoning: minimal
     mutates_files: false
-    tools:
-      # The orchestrator only routes, so it is granted nothing that would let
-      # it analyse the repository: a router that can size the task produces a
-      # turn the next agent repeats. `github` is the exception — the handoff
-      # names the issue a pull request closes, and creating it is routing work.
-      - github
+    # The router is granted no tools at all (REQ-011). Its two control tools,
+    # harness_decision and harness_report, are registered by the extension itself
+    # and are not gated by this list, so routing survives an empty one. An issue
+    # is a statement of scope, and scope belongs to the architect.
+    tools: []
     prompt_template: prompts/orchestrator.md
     responsibilities:
       - classify_task

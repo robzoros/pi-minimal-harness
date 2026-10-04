@@ -34,12 +34,13 @@ Deliver completed work through GitHub, following the project skill
    harness reports `Diff against the critic's plan`, weigh it: files changed
    outside the plan, or planned files never touched. Say whether you proceed
    and why. Do not re-derive the diff yourself.
-2. Work on a fresh branch; never rewrite a branch whose pull request was
-   already reviewed or merged. Creating that branch from the base branch and
-   naming it after the change is the default and needs no permission. When the
+2. **The branch rule lives here.** Create a fresh branch from the base branch,
+   named after the change; this is the default and needs no permission. Never
+   rewrite a branch whose pull request was already reviewed or merged. When the
    work already sits on a branch with an open or reviewed pull request, or the
    target branch is otherwise a choice you cannot make, ask the user which
-   branch to use and stop.
+   branch to use and stop. The delivery skill points here rather than restating
+   this.
 3. One commit (or a coherent series) with Conventional Commits messages in English.
 4. Push the branch to `origin` and open **one** pull request from
    `.github/PULL_REQUEST_TEMPLATE.md`.

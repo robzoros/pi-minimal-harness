@@ -11,7 +11,7 @@ the Pi coding agent, published for use in other people's projects.
 | `README.md` | Public front door: inspiration, install, configuration, commands, skills. |
 | `pi-minimal-harness.md` | The generic harness contract, copied verbatim to the root of every adopting project and pointed at from their `AGENTS.md`. |
 | `harness.config.yaml` | Single source of truth: `defaults` (mode, auto-harness, short-circuit, dispatch gate, contract file), `commands`, `workflows` (mode → agent steps), `agents` (model, reasoning, tools, prompt template), `skills`. |
-| `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool, and the control tools (`harness_decision`, `harness_report`, `harness_session`). |
+| `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool, and the control tools (`harness_decision`, `harness_report`). |
 | `prompts/` | Per-agent prompt templates referenced by `harness.config.yaml`. |
 | `.agents/skills/github-delivery/` | The shipped project skill (branch → commit → push → PR). |
 | `docs/WORKFLOW.md`, `docs/DISPATCH-PLAN.md` | Design documentation (roles/modes/config shape; background dispatch plan). |
@@ -48,14 +48,16 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
 - The **architect** converses with the user and maintains the formal
   requirements in `defaults.requirements_file` (created by `init`/`update` when
   missing, in the shape `defaults.requirements_format` chooses). It writes that
-  file **only when the user approves**, with `/harness-validate`. It opens its
-  multi-turn session with `harness_session(START)`; only the user closes it,
-  with `/harness-end` — no model action closes a session, so an ordinary
-  question gets one architect turn instead of trapping the user in one.
+  file **only when the user approves**, with `/harness-validate`. An architect
+  step leaves the design session open implicitly, and only the user closes it,
+  with `/harness-end` — no model action opens or closes a session, so a model
+  that forgets cannot hand the conversation back to the orchestrator.
   Approving is not finishing: `/harness-validate` leaves the session open,
   because the next requirement may need the context of this conversation.
-  While the session is open, the user's next plain messages go straight to the
-  architect and skip the orchestrator. Slash commands are never intercepted.
+  The open state is persisted with `pi.appendEntry()` and restored in
+  `session_start`, so `/reload` does not lose it. While the session is open, the
+  user's next plain messages go straight to the architect and skip the
+  orchestrator. Slash commands are never intercepted.
 - The driver checks every step's report: a complete `harness_report` call
   (`changed_files`, `checks`, `notes`, `lessons` all present, `[]` for a
   genuinely empty one) satisfies it, and the textual marker `HARNESS-DONE` is
@@ -74,7 +76,7 @@ commits or remote yet (delivery requires deciding `.gitignore` policy first).
   `defaults.subagent_context_file` when it resolves, `pi-minimal-harness.md`,
   an `AGENTS.md` carrying the harness block, then a legacy `AGENTS-addition.md`
   (see `docs/DISPATCH-PLAN.md`).
-- The control tools `harness_decision`, `harness_report` and `harness_session`
+- The control tools `harness_decision` and `harness_report`
   record the pipeline's control flow. Their state is captured in their own
   `execute`, which runs after the `message_end` hook — so the tool must assign
   unconditionally and the hook only when empty, or the textual fallback would

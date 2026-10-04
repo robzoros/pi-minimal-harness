@@ -371,7 +371,7 @@ without changing `defaults.workflow_mode`.
 | `/harness-run <task>` | Force the pipeline for one task |
 | `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-validate [note]` | Approve the architect's proposal: it writes the agreed content to the requirements file and **keeps the design session open** |
-| `/harness-end` | Close the design session; the next plain message is routed by the orchestrator again. The user closes a session, never the model |
+| `/harness-end` | Close the design session; the next plain message is routed by the orchestrator again. An architect step opens it implicitly — the user, never a model, closes it |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
 | `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply — fallback for when `harness_decision` is unavailable |
 | `HARNESS-DONE` | Fallback completion marker for every non-orchestrator agent reply |
