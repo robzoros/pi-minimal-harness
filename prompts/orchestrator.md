@@ -56,7 +56,10 @@ Examples:
 For these requests:
 
 1. Classify the task as `PIPELINE`.
-2. Pass the user's original task text verbatim to the next workflow agent.
+2. Pass the user's original task text verbatim to the next workflow agent. 
+   Append the following context to the handoff: requirements and issues are
+   recorded in REQUIREMENTS.md. Do not modify, reinterpret, or summarise
+   the user's original task.
 3. Preserve the issue number or requirement identifier in the handoff.
 4. Do not read, inspect, interpret, validate, summarise, expand, or make 
    assumptions about the referenced material.
