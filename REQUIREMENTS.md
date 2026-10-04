@@ -455,7 +455,7 @@ read it, so the memories accumulate unread.
   `tests/harness.test.mjs`, `tests/install.test.mjs`
 - **Issue**: #28
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-015 — A failing test sends the work back to the implementer, bounded at three rounds
 
@@ -492,7 +492,7 @@ read it, so the memories accumulate unread.
   `prompts/implementer.md`, `prompts/delivery.md`, `tests/harness.test.mjs`
 - **Issue**: #28
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-016 — An errored or interrupted pipeline leaves a way forward
 

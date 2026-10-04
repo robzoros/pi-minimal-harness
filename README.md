@@ -2,8 +2,8 @@
 
 A minimal, configuration-driven **agent harness for [Pi](https://github.com/earendil-works/pi)**:
 a multi-agent workflow (orchestrator → explorer → critic → implementer →
-delivery) that the Pi runtime executes step by step, with per-agent models,
-reasoning efforts, prompt templates, interactive slash commands, and
+tester → delivery) that the Pi runtime executes step by step, with per-agent
+models, reasoning efforts, prompt templates, interactive slash commands, and
 evidence-based reports.
 
 Drop it into a Pi project, edit one YAML file, and your requests run through a
@@ -58,7 +58,7 @@ your-project/
 │   └── extensions/
 │       └── harness.ts          # the whole harness (commands, driver, dispatch)
 ├── harness.config.yaml         # modes, agents, models, gates
-├── prompts/                    # the five agent prompt templates
+├── prompts/                    # the six agent prompt templates
 │   ├── orchestrator.md
 │   ├── explorer.md
 │   ├── critic.md

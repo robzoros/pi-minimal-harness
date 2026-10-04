@@ -33,10 +33,22 @@ the task as stated and say so.
    obviously unreferenced change: a new private helper nobody imports needs no
    impact analysis.
 4. Implement the adjusted plan with small, focused edits.
-5. Run the project's own checks — whatever its `AGENTS.md` or package scripts
-   define (lint, tests, builds). Report anything that could not be run.
+5. Run **only the cheapest check that proves the change builds** — a type
+   check, a compile, or the single fastest test that touches the code you
+   changed — and **say which one you ran**. The suite is not your duty: the
+   `tester` step writes the tests and runs them, and its declared checks are
+   what gates delivery. Handing it a change that does not compile only costs a
+   round. Report anything you could not run.
 6. Inspect your own diff before finishing.
 7. Do **not** commit, push or open a PR — delivery is a separate step.
+
+   **On a repair round** (REQ-015): when `{{previous}}` carries a `tester`
+   report with a check declared `failed`, fix the cause, not the symptom. Do
+   not weaken or delete the failing test to make it green — the tester's
+   findings are the gate, and a test you edited away is a defect the next run
+   will reintroduce. If the test itself is wrong, say so explicitly in
+   `notes` and let the tester judge it on the next round. The counter is the
+   driver's; you cannot reset it and you do not ask for another round.
 8. Update `CHANGELOG.md` under `[Unreleased]` when the repository requires
    entries for behavior changes. You own this edit: the delivery step has no
    file-editing tools and only verifies that the entry exists.
@@ -54,7 +66,9 @@ the task as stated and say so.
 Table or list of changed files with one line each.
 
 ### Evidence
-Checks run and their results (including failures or skips).
+The cheapest check you ran that proves the change builds, named explicitly, and
+its result — including anything that could not be run. Not the full suite: that
+is the `tester` step's.
 
 ### Notes for delivery
 Anything the delivery step must know: the issue number from the

@@ -259,7 +259,9 @@ test("a fresh install reports the template placeholders it shipped", async () =>
   try {
     const result = runInstaller(["init", "--project", project]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /warning 6 agent\(s\) still use the template model placeholder/);
+    // Seven since REQ-014 added the tester: architect, orchestrator, explorer,
+    // critic, implementer, tester, delivery.
+    assert.match(result.stdout, /warning 7 agent\(s\) still use the template model placeholder/);
     assert.match(result.stdout, /warning project: is still the template placeholder/);
 
     // Once the models are real the warning goes away, and dry-run shows it too.
@@ -564,6 +566,137 @@ test("update adds the architect agent to a configuration that predates it", asyn
     assert.match(config, /^project: local-project$/m);
     assert.match(config, /^ {2}my_own_key: keep-me$/m);
     assert.match(config, /^ {6}- only-me$/m);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+// REQ-014: `mergeAdditive` only adds keys, so `workflows.full.steps` — a
+// sequence that already exists — keeps the local value and the `tester` step
+// would never activate on an existing installation. These cover the targeted
+// migration that closes that gap.
+const stepsOf = (config) => {
+  const block = /^ {2}full:\n(?: {4}\S.*\n)*?( {4})steps:\n((?: {6}-\s+\S+\s*\n)+)/m.exec(config);
+  return block ? [...block[2].matchAll(/^ {6}-\s+(\S+)\s*$/gm)].map((m) => m[1]) : null;
+};
+/** An installation from before REQ-014: the five shipped steps, nothing custom. */
+const PRE_TESTER_CONFIG = `project: local-project
+
+defaults:
+  workflow_mode: full
+  auto_harness: true
+
+workflows:
+  full:
+    steps:
+      - orchestrator
+      - explorer
+      - critic
+      - implementer
+      - delivery
+  full-dry-run:
+    steps:
+      - orchestrator
+      - explorer
+      - critic
+  analysis:
+    steps:
+      - orchestrator
+      - architect
+
+agents:
+  delivery:
+    model: provider/model-id
+    reasoning: low
+`;
+
+test("update inserts the tester step into the previously shipped full workflow", async () => {
+  const project = await tempProject();
+  try {
+    await fs.writeFile(path.join(project, "harness.config.yaml"), PRE_TESTER_CONFIG);
+    const config = path.join(project, "harness.config.yaml");
+
+    const dry = runInstaller(["update", "--project", project, "--dry-run"]);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, /migrate .*workflows\.full\.steps gains "tester"/);
+    // A dry run says what it would do and writes nothing.
+    assert.deepEqual(stepsOf(await fs.readFile(config, "utf8")), [
+      "orchestrator", "explorer", "critic", "implementer", "delivery",
+    ]);
+
+    const migrated = runInstaller(["update", "--project", project]);
+    assert.equal(migrated.status, 0, migrated.stderr);
+    assert.deepEqual(stepsOf(await fs.readFile(config, "utf8")), [
+      "orchestrator", "explorer", "critic", "implementer", "tester", "delivery",
+    ]);
+    // The agent block the merge adds is what makes the new step resolvable, so
+    // it has to land in the same run: an installation must never end up naming
+    // a step whose agent does not exist.
+    assert.match(await fs.readFile(config, "utf8"), /^ {2}tester:$/m);
+    // Only the steps list is rewritten; the project's own values survive.
+    assert.match(await fs.readFile(config, "utf8"), /^project: local-project$/m);
+    assert.match(await fs.readFile(config, "utf8"), /^ {2}auto_harness: true$/m);
+    assert.deepEqual(stepsOf(await fs.readFile(config, "utf8")).length, 6);
+
+    // Idempotent: the migrated list no longer equals the previous one.
+    const again = runInstaller(["update", "--project", project]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.doesNotMatch(again.stdout, /migrate .*workflows\.full\.steps/);
+    assert.deepEqual(stepsOf(await fs.readFile(config, "utf8")), [
+      "orchestrator", "explorer", "critic", "implementer", "tester", "delivery",
+    ]);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("update keeps a customised full workflow and reports that the tester was not inserted", async () => {
+  const project = await tempProject();
+  try {
+    const custom = PRE_TESTER_CONFIG.replace(
+      /^ {2}full:\n {4}steps:\n(?: {6}-\s+\S+\s*\n)+/m,
+      "  full:\n    steps:\n      - orchestrator\n      - implementer\n      - delivery\n",
+    );
+    await fs.writeFile(path.join(project, "harness.config.yaml"), custom);
+    const config = path.join(project, "harness.config.yaml");
+
+    const result = runInstaller(["update", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    // Inserting a step into a workflow somebody reordered is the one edit an
+    // adopter never asked for, so the list is left exactly as it was and the
+    // only thing they get is the note telling them it is available.
+    assert.deepEqual(stepsOf(await fs.readFile(config, "utf8")), [
+      "orchestrator", "implementer", "delivery",
+    ]);
+    assert.match(result.stdout, /customised workflows\.full\.steps/);
+    assert.match(result.stdout, /add it yourself before "delivery"/);
+    assert.doesNotMatch(result.stdout, /migrate .*workflows\.full\.steps gains/);
+
+    // And it stays reported on every later run, so it cannot be forgotten.
+    const again = runInstaller(["update", "--project", project]);
+    assert.match(again.stdout, /customised workflows\.full\.steps/);
+    assert.deepEqual(stepsOf(await fs.readFile(config, "utf8")), [
+      "orchestrator", "implementer", "delivery",
+    ]);
+  } finally {
+    await fs.rm(project, { recursive: true, force: true });
+  }
+});
+
+test("init ships the tester step and the tester agent from the template", async () => {
+  const project = await tempProject();
+  try {
+    const result = runInstaller(["init", "--project", project]);
+    assert.equal(result.status, 0, result.stderr);
+    const config = await fs.readFile(path.join(project, "harness.config.yaml"), "utf8");
+    assert.deepEqual(stepsOf(config), [
+      "orchestrator", "explorer", "critic", "implementer", "tester", "delivery",
+    ]);
+    assert.match(config, /^ {2}tester:$/m);
+    assert.match(config, /^ {4}mutates_files: true$/m);
+    // The prompt the agent block names has to be installed with it, or
+    // validation fails on a fresh install.
+    assert.match(await fs.readFile(path.join(project, "prompts", "tester.md"), "utf8"), /# Tester/);
   } finally {
     await fs.rm(project, { recursive: true, force: true });
   }

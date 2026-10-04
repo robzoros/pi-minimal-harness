@@ -37,7 +37,7 @@ import { promisify } from "node:util";
 // mode are read from `workflows.<mode>` in the configuration, so this list is
 // never the place a mode is defined.
 const MODES: Array<{ id: string; steps: string; when: string }> = [
-  { id: "full", steps: "orchestrator -> explorer -> critic -> implementer -> delivery", when: "non-trivial tasks that should end in a pull request" },
+  { id: "full", steps: "orchestrator -> explorer -> critic -> implementer -> tester -> delivery", when: "non-trivial tasks that should end in a pull request" },
   { id: "full-dry-run", steps: "orchestrator -> explorer -> critic", when: "exploration and critique without editing files" },
   { id: "analysis", steps: "orchestrator -> architect", when: "a question, an idea or anything needing conceptual design" },
 ];
@@ -47,8 +47,23 @@ const ANALYSIS_MODE = "analysis";
 const ARCHITECT_AGENT = "architect";
 /** The agent that delivers: the one whose preconditions the harness now checks. */
 const DELIVERY_AGENT = "delivery";
+/**
+ * The agent whose declared checks are the gate (REQ-014). It sits last among
+ * the file-mutating steps, so it is the one whose `checks` the delivery gate
+ * re-runs, and it is the step a `failed` check sends the pipeline back from.
+ */
+const TESTER_AGENT = "tester";
+/** The agent a failed check returns the work to (REQ-015). */
+const IMPLEMENTER_AGENT = "implementer";
 const MODE_IDS = MODES.map((m) => m.id);
-const REQUIRED_AGENTS = ["architect", "orchestrator", "explorer", "critic", "implementer", "delivery"];
+const REQUIRED_AGENTS = ["architect", "orchestrator", "explorer", "critic", "implementer", "tester", "delivery"];
+/**
+ * How many repair rounds a `failed` declared check may buy (REQ-015).
+ * Three is a bound, not a target: past the third the failure is the answer.
+ * Not a config key — the requirement asks for a bound, and an adopter who wants
+ * a different one wants a different workflow, not a bigger number.
+ */
+const MAX_REPAIR_ROUNDS = 3;
 /**
  * How many times a step whose turn ended in a model error is retried (REQ-016).
  * One is the whole point: a transient provider failure is the common cause and
@@ -1327,6 +1342,27 @@ export async function collectChangedPaths(
 }
 
 /**
+ * The declared checks a step reported as `failed`.
+ *
+ * One place, because two rules depend on the same predicate and disagreeing
+ * copies of it is how a red test ends up delivered: REQ-015 opens a repair
+ * round on it, and it refuses delivery. It is deliberately *not* the same test
+ * as `CheckVerification.contradicted`, which is "claimed passed and did not
+ * pass" — a step that reports `failed` is contradicting nothing, it is telling
+ * the truth, and truth of that kind must still stop the run.
+ *
+ * Pure and exported so the rule is testable without driving a pipeline. A
+ * missing or non-array `checks` yields no failures: a step that declared no
+ * checks declared no failure either.
+ */
+export function declaredFailedChecks(
+  checks: { command: string; result: CheckResult }[] | null | undefined,
+): { command: string; result: CheckResult }[] {
+  if (!Array.isArray(checks)) return [];
+  return checks.filter((check) => normalizeCheckResult(check?.result) === "failed");
+}
+
+/**
  * Re-run the checks the implementing step declared and report every claim the
  * run contradicts. Only "claimed passed, did not pass" blocks delivery: the
  * opposite case (claimed `failed`, passed anyway) is good news, and blocking on
@@ -1563,6 +1599,19 @@ if (!steps || steps.length === 0) {
   let shortCircuited = false;
   let reportMissing = false;
   let blockedByCritic = false;
+  /**
+   * REQ-015: set when the repair rounds ran out with a check still declared
+   * `failed`. It is terminal and deliberately NOT resumable, like the critic's
+   * BLOCKED verdict: the failure is the answer, and resuming into delivery
+   * would ship the very tests that are red. Its own branch below, because the
+   * generic stop path would compute `failedStep` from `completed.length` and
+   * point `/harness-resume` straight at delivery.
+   */
+  let repairExhausted = false;
+  // REQ-015: repair rounds already spent. Driver-local on purpose — no tool
+  // writes it, so no model can reset it, and a run that reaches its bound stops
+  // instead of asking the tester to try again.
+  let repairRounds = 0;
   // Seeded with the steps a resumed run already completed, so the end-of-run
   // summary and the completion test describe the whole workflow rather than
   // only the tail this invocation ran.
@@ -1597,6 +1646,10 @@ if (!steps || steps.length === 0) {
       // step's decision as its own.
       lastDecision = null;
       lastReport = null;
+      // Per step, like the two above: the failed checks are this step's own
+      // declaration, and the round is decided from them after the report is
+      // validated.
+      let failedChecks: { command: string; result: CheckResult }[] = [];
       const block = agentBlock(lines, agentName);
       if (!block) {
         ctx.ui.notify(`Pipeline stopped: agent "${agentName}" is not defined in the configuration.`, "error");
@@ -1686,6 +1739,22 @@ if (!steps || steps.length === 0) {
       // the run — the opposite case is good news, not a reason to refuse.
       let verifiedChecks: CheckVerification[] = [];
       if (agentName === DELIVERY_AGENT && implementingChecks && implementingChecks.length > 0) {
+        // REQ-015: a check the implementing step declared `failed` stops the
+        // pipeline on its own account, not only because it failed again on the
+        // re-run. The repair round is what normally keeps a red check away from
+        // this step, but `/harness-delivery` and a resumed run reach delivery
+        // without passing through a round, and a reported failure is still a
+        // failure.
+        const reportedFailed = declaredFailedChecks(implementingChecks);
+        if (reportedFailed.length > 0) {
+          ctx.ui.notify(
+            `Pipeline stopped before "${agentName}": ${implementingAgent ?? "the implementing step"} reported a check as failed — ` +
+              reportedFailed.map((c) => `"${c.command}"`).join(", ") +
+              `. Re-run the task so the tests are written and the checks pass.`,
+            "error",
+          );
+          break;
+        }
         verifiedChecks = await verifyDeclaredChecks(implementingChecks, ctx.cwd, checkTimeoutMs(lines));
         const contradicted = verifiedChecks.filter((c) => c.contradicted);
         if (contradicted.length > 0) {
@@ -1780,7 +1849,12 @@ if (!steps || steps.length === 0) {
       }
       // Outside the retry loop on purpose: a step is recorded once, by the
       // attempt that actually finished it.
-      completed.push(agentName);
+      // A step that already completed is not recorded twice. REQ-015's repair
+      // round re-runs the implementer and the tester, and the deduplication is
+      // what keeps `completed` the ordered set of distinct steps: the finish
+      // test and the resume record both read its length as a position in
+      // `steps`, so a re-run that appended would push it past the end.
+      if (!completed.includes(agentName)) completed.push(agentName);
       previousStepOutput = turn?.text ?? null;
 
       // An architect step leaves the design session open (REQ-010). This is
@@ -1891,11 +1965,16 @@ if (!steps || steps.length === 0) {
           expectedPaths = lastReport?.plannedPaths ?? null;
         }
         // REQ-002: the checks a mutating step declared outlive its report too,
-        // so delivery can be gated on them.
+        // so delivery can be gated on them. The tester is the last mutating
+        // step of `full`, so its checks are the ones the gate reads.
         if (agentMutatesFiles(lines, agentName) && Array.isArray(lastReport?.checks)) {
           implementingChecks = lastReport?.checks ?? null;
           implementingAgent = agentName;
         }
+        // REQ-015: the failed set is read here, before the report is cleared
+        // below, so the round can be decided from what the step actually
+        // declared rather than from its prose.
+        failedChecks = declaredFailedChecks(lastReport?.checks);
         // REQ-003: the moment there is something to compare, compute the
         // discrepancy so it is waiting for the delivery step. Comparing names
         // is objective, so this runs even when no git is available: an empty
@@ -1911,6 +1990,51 @@ if (!steps || steps.length === 0) {
         lastReport = null;
       }
       if (blockedByCritic) break;
+
+      // REQ-015: a check the tester declared `failed` sends the work back to
+      // the implementer and runs the tester again, and nothing else: the
+      // explorer and the critic are not re-run because the plan already exists,
+      // and re-deriving it costs two turns to restate what is on disk.
+      //
+      // The loop is rewound rather than the steps list rewritten, so the
+      // implementer re-runs through the same path as its first turn — model,
+      // reasoning, template, preflight, report. `{{previous}}` is already the
+      // tester's reply, so the failing command and its output reach the
+      // implementer without any extra wiring.
+      if (agentName === TESTER_AGENT && failedChecks.length > 0) {
+        const implementerIndex = steps.lastIndexOf(IMPLEMENTER_AGENT);
+        // A workflow without an implementer cannot be repaired: rewinding to
+        // nothing would spin. Stop, and say so.
+        if (implementerIndex === -1 || implementerIndex >= i) {
+          repairExhausted = true;
+          ctx.ui.notify(
+            `Pipeline "${mode}": the "${TESTER_AGENT}" reported a failed check but the workflow has no "${IMPLEMENTER_AGENT}" step to return it to. ` +
+              `Fix ${failedChecks.map((c) => `"${c.command}"`).join(", ")} and run the task again.`,
+            "error",
+          );
+          break;
+        }
+        if (repairRounds >= MAX_REPAIR_ROUNDS) {
+          repairExhausted = true;
+          ctx.ui.notify(
+            `Pipeline "${mode}" stopped after ${MAX_REPAIR_ROUNDS} repair rounds: "${TESTER_AGENT}" still reports ` +
+              `${failedChecks.map((c) => `"${c.command}"`).join(", ")} as failed. This is the final answer — there is no delivery. ` +
+              `The tree holds the partial work; fix the failure and run the task again.`,
+            "error",
+          );
+          break;
+        }
+        repairRounds++;
+        ctx.ui.notify(
+          `Repair round ${repairRounds}/${MAX_REPAIR_ROUNDS}: "${TESTER_AGENT}" reported ${failedChecks.map((c) => `"${c.command}"`).join(", ")} as failed. ` +
+            `Returning to "${IMPLEMENTER_AGENT}" with the failure, then re-running "${TESTER_AGENT}".`,
+          "warning",
+        );
+        // `continue` runs the loop's increment, so the rewind target is the
+        // step before the implementer.
+        i = implementerIndex - 1;
+        continue;
+      }
     }
   } finally {
     if (touchedModel && originalModel) {
@@ -1956,6 +2080,19 @@ if (!steps || steps.length === 0) {
     writeStoppedPipeline(pi);
     ctx.ui.notify(
       `Pipeline "${mode}": critic verdict BLOCKED — stopped before the file-mutating steps; the critic report is the final answer.`,
+      "warning",
+    );
+  } else if (repairExhausted) {
+    // Terminal for the same reason as the critic's BLOCKED, and with the same
+    // consequence for the record: it is CLEARED, not written. The generic stop
+    // path below computes `failedStep` from `completed.length`, which after a
+    // repair round names `delivery` — a resume point that would hand the user a
+    // pull request for the very change its tests reject. The failure was
+    // already reported in the loop; this says what the run is worth.
+    writeStoppedPipeline(pi);
+    ctx.ui.notify(
+      `Pipeline "${mode}": the repair rounds ran out with a check still reported as failed — no delivery. ` +
+        `The tree holds ${completed.join(" -> ")}; fix the failing test and run the task again.`,
       "warning",
     );
   } else {

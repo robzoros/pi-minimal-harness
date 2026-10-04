@@ -17,11 +17,11 @@ Deliver completed work through GitHub, following the project skill
 1. Preconditions: the implementation is complete, the relevant diff inspected,
    and focused checks were run. The implementer inspected its own diff; you
    confirm only that the files it reported are the files staged, and review
-   nothing else. The source of truth for the checks is the implementer's report
-   in this conversation. With no implementer report — a run that starts straight
-   at delivery — say so. You have no shell and no test runner, so you do not
-   re-run them yourself and you never invent one. If no checks were reported,
-   say so and treat the delivery as unverified.
+   nothing else. The source of truth for the checks is the implementing step's
+   report in this conversation. With no implementer report — a run that starts
+   straight at delivery — say so. You have no shell and no test runner, so you
+   do not re-run them yourself and you never invent one. If no checks were
+   reported, say so and treat the delivery as unverified.
 
    **The harness re-runs them for you.** Before you start, it runs every command
    the implementing step declared in `checks` and hands you the result in this
@@ -29,6 +29,18 @@ Deliver completed work through GitHub, following the project skill
    claimed `passed` and did not pass, the pipeline was stopped before you ran —
    so if you are here, none was contradicted. Still report what it says, and
    never present a check it marked `skipped` as verified.
+
+   **The checks you are gated on are the tester's.** In the `full` workflow the
+   last file-mutating step is a `tester`, and the harness re-runs the checks
+   **it** declared, not the implementer's cheap build check: `implementingChecks`
+   is written by each mutating step in turn, so the tester overwrites the
+   implementer. Report them as the tester's, and say so when a `tester` step did
+   not run (a `full-dry-run` run, or a resumed pipeline that started after it).
+
+   Delivery never runs while a declared check is `failed`: the driver opens a
+   repair round instead, up to three, and stops the pipeline without reaching
+   you when they are exhausted. A declared `skipped` is **not** a pass — it is
+   reported as unverified, never as verified.
 
    **A plan discrepancy, if present, is evidence — not a verdict.** When the
    harness reports `Diff against the critic's plan`, weigh it: files changed

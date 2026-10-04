@@ -624,6 +624,66 @@ async function migrateWorkflowMode(destination, options, report) {
   await fs.writeFile(destination, next, "utf8");
 }
 
+/**
+ * The `full` workflow as it shipped before REQ-014 added the `tester` step.
+ *
+ * `mergeAdditive` only ADDS keys: a wholly missing nested mapping (an agent
+ * block) is inserted whole, but a sequence that already exists keeps the local
+ * value — "the user's value always wins". So `update` adds `agents.tester` and
+ * validation then passes, while `workflows.full.steps` keeps its five entries
+ * and the tester never runs: a feature that silently does not activate.
+ */
+const LEGACY_FULL_STEPS = ["orchestrator", "explorer", "critic", "implementer", "delivery"];
+/** The step REQ-014 inserts, and the one it is inserted before. */
+const TESTER_STEP = "tester";
+const STEP_BEFORE_TESTER = "delivery";
+
+/**
+ * Insert `tester` into `workflows.full.steps` when the list is still the one
+ * this release shipped, and leave a customised list exactly as it is.
+ *
+ * The guard is equality with the whole previous list, never a "contains
+ * implementer" test: a project that reordered or removed a step made a choice,
+ * and silently inserting a step into it is the one edit an adopter never
+ * asked for. A customised list is reported instead, which is the only way the
+ * user learns the tester is available and not running.
+ *
+ * Idempotent: the migrated list no longer equals `LEGACY_FULL_STEPS`, so a
+ * second `update` does nothing.
+ */
+async function migrateFullSteps(destination, options, report) {
+  if (!(await pathExists(destination))) return;
+  const text = await fs.readFile(destination, "utf8");
+  const relative = path.relative(options.project, destination) || destination;
+
+  // Read the list with the same indentation the file already uses: `steps:` at
+  // 4 spaces and its entries at 6 is what every shipped config has.
+  const block = /^ {2}full:\n(?: {4}\S.*\n)*?( {4})steps:\n((?: {6}-\s+\S+\s*\n)+)/m.exec(text);
+  if (!block) return;
+  const steps = [...block[2].matchAll(/^ {6}-\s+(\S+)\s*$/gm)].map((m) => m[1]);
+
+  const sameAs = (a, b) => a.length === b.length && a.every((step, i) => step === b[i]);
+  if (sameAs(steps, [...LEGACY_FULL_STEPS, TESTER_STEP])) return; // already migrated
+
+  if (!sameAs(steps, LEGACY_FULL_STEPS)) {
+    report.push(
+      `note ${relative} has a customised workflows.full.steps (${steps.join(" -> ")}); the "${TESTER_STEP}" step was not inserted — add it yourself before "${STEP_BEFORE_TESTER}" to run the tests as a step of their own`,
+    );
+    return;
+  }
+
+  const insertAt = steps.indexOf(STEP_BEFORE_TESTER);
+  const next = [...steps];
+  next.splice(insertAt === -1 ? steps.length : insertAt, 0, TESTER_STEP);
+  report.push(`migrate ${relative}: workflows.full.steps gains "${TESTER_STEP}" (${next.join(" -> ")})`);
+  if (options.dryRun) return;
+  await fs.writeFile(
+    destination,
+    text.replace(block[2], next.map((step) => `      - ${step}\n`).join("")),
+    "utf8",
+  );
+}
+
 async function install(options) {
   const report = [];
   await fs.mkdir(options.project, {recursive: true });
@@ -665,6 +725,9 @@ async function install(options) {
   );
   await ensureHarnessReference(options.project, options, report);
   await migrateWorkflowMode(path.join(options.project, "harness.config.yaml"), options, report);
+  // After the merge, so the `agents.tester` block the merge adds is already on
+  // disk when validation next runs against this file.
+  await migrateFullSteps(path.join(options.project, "harness.config.yaml"), options, report);
   await ensureChangelog(options.project, options, report);
   await ensureRequirements(options.project, options, report);
   await reportTemplatePlaceholders(path.join(options.project, "harness.config.yaml"), report);

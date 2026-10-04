@@ -48,6 +48,11 @@ paths are the contract with the harness: it compares them against the diff after
 the implementer runs and hands the difference to delivery, so name every file
 your plan really covers — including the tests you expect to change.
 
+**Name the test files too** (REQ-014). A separate `tester` step writes them, and
+REQ-003 compares this list against everything the diff touched: a test file
+written by the tester and missing from your list reads as unplanned scope
+creep, and the pipeline carries a discrepancy that is not real.
+
 ## Completion
 
 When you are invoked as a background subagent, your context is this brief plus
