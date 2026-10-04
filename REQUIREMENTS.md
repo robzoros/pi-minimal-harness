@@ -78,7 +78,7 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
 - **Traces**: `.pi/extensions/harness.ts` (`composeDispatchSystemPrompt`),
   `pi-minimal-harness.md`, `tests/harness.test.mjs`
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-002 — Delivery re-runs the declared checks
 
@@ -269,7 +269,7 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
 - **Traces**: `.pi/extensions/harness.ts` (`inArchitectSession`, `session_start`),
   `docs/extensions.md` (state table), `tests/harness.test.mjs`
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-010 — The architect's turn opens the design session, and no model opens or closes it
 
@@ -309,7 +309,7 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
   `harness_session` registration), `prompts/architecture.md`, `README.md:368-375`,
   `pi-minimal-harness.md:52-54`, `CHANGELOG.md`
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-011 — The architect owns the issues, the router owns nothing
 
@@ -349,7 +349,7 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
   `prompts/architecture.md`, `prompts/orchestrator.md`, `docs/WORKFLOW.md:56`,
   `pi-minimal-harness.md`, `README.md`
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-012 — Only the delivery step creates a branch
 
@@ -373,7 +373,7 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
   - [ ] No other agent, command or file in the repository creates a branch.
 - **Traces**: `prompts/delivery.md:37-38`, `.agents/skills/github-delivery/SKILL.md:26,70`
 - **Priority**: P2
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ### REQ-013 — `/harness-validate` is covered by the smoke test
 
@@ -403,7 +403,7 @@ Pull request #26 is merged, so the six `IMPLEMENTED` requirements below are on
 - **Traces**: `tests/harness.test.mjs`, `.pi/extensions/harness.ts`
   (`harness-validate` handler), `prompts/architecture.md`
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ## Modifications
 
