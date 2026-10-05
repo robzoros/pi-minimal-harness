@@ -190,8 +190,15 @@ cross-cutting changes.
 Steps:
 
 ```text
-orchestrator -> explorer -> critic -> implementer -> delivery
+orchestrator -> explorer -> critic -> implementer -> tester -> delivery
 ```
+
+The `tester` step exists so the tests have an agent of their own: the
+implementer makes the change and runs the cheapest check that proves it builds,
+and the tester writes the tests, runs them and declares the checks the harness
+gates delivery on. A declared check that is `failed` sends the work back to the
+implementer and re-runs the tester, up to three rounds, without re-running the
+explorer or the critic; after the third the pipeline stops without delivering.
 
 ### Full Dry Run
 

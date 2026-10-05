@@ -41,6 +41,7 @@ workflows:
       - explorer
       - critic
       - implementer
+      - tester
       - delivery
 
   analysis:
@@ -135,8 +136,29 @@ agents:
       - inspect_diff
       - record_findings_with_engram
 
+  # REQ-014: the tests are a step of their own. The implementer makes the change
+  # and runs the cheapest check that proves it builds; the tester writes the
+  # tests, runs them, and declares the results the harness gates delivery on.
+  # It mutates files because writing tests is writing files.
+  tester:
+    model: opencode-go/space-bunny-free
+    reasoning: high
+    mutates_files: true
+    tools:
+      - filesystem
+      - shell
+      - tests
+      - engram
+      - codegraph
+    prompt_template: prompts/tester.md
+    responsibilities:
+      - write_the_tests_the_change_needs
+      - run_the_projects_checks
+      - declare_the_checks_and_their_results
+      - record_findings_with_engram
+
   delivery:
-    model: opencode-go/longcat-2.5-preview-free
+    model: opencode-go/space-bunny-free
     reasoning: low
     mutates_files: true
     tools:

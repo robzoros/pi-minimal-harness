@@ -107,6 +107,7 @@ const nextAssistantText = (turn = 0) => {
     const entry = assistantScript.shift();
     if (entry && typeof entry === "object") {
       if (entry.stopReason) assistantStopReason = entry.stopReason;
+      if (entry.tool) pendingToolCall = null; // consumed above, before the turn
       return entry.text ?? "";
     }
     return entry;
@@ -153,6 +154,12 @@ const fakePi = {
     idle = false;
     setTimeout(async () => {
       assistantTurns++;
+      // A scripted entry may carry the tool call it wants on this turn. Read
+      // here, before `pendingToolCall` is consumed: REQ-015's repair round needs
+      // several steps to each report their own checks, and a FIFO script cannot
+      // express "turn 5 calls the tool, turns 2-4 do not" otherwise.
+      const scripted = assistantScript.length > 0 ? assistantScript[0] : null;
+      if (scripted && typeof scripted === "object" && scripted.tool) pendingToolCall = scripted.tool;
       const call = pendingToolCall;
       pendingToolCall = null;
       if (call) {
@@ -1302,7 +1309,7 @@ if (gateReady) {
   await mod.runPipeline(fakePi, allowGate, "tarea", waitTurn, "full");
   check(
     "preflight: the operator override runs the mutating steps, asking once",
-    confirms === 1 && sent.length === 5,
+    confirms === 1 && sent.length === 6,
     `confirms=${confirms} prompts=${sent.length}`,
   );
 
@@ -1316,7 +1323,7 @@ if (gateReady) {
   await mod.runPipeline(fakePi, advisoryGate, "tarea", waitTurn);
   check(
     "preflight: advisory only warns and never asks",
-    sent.length === 5 && confirms === 1 && notifies.some((n) => n.includes("uncommitted changes")),
+    sent.length === 6 && confirms === 1 && notifies.some((n) => n.includes("uncommitted changes")),
     `prompts=${sent.length} confirms=${confirms} ${notifies.join(" | ")}`,
   );
 
@@ -1500,6 +1507,48 @@ check(
   JSON.stringify(mod.getAgentTools(["agents:", "  x:", "    model: p/m"], "x")) === "[]" &&
     JSON.stringify(mod.getAgentTools(cfgLines, "no-such-agent")) === "[]",
 );
+// REQ-014: the tests are a step of their own, between the implementer and
+// delivery. The order is the requirement, so it is asserted as a whole rather
+// than as a membership test.
+check(
+  "config: the full workflow runs orchestrator -> explorer -> critic -> implementer -> tester -> delivery",
+  JSON.stringify(simpleSteps) === JSON.stringify(["orchestrator", "explorer", "critic", "implementer", "tester", "delivery"]),
+  simpleSteps.join(" -> "),
+);
+check(
+  "config: the tester mutates files and holds the tools its duty needs",
+  mod.agentMutatesFiles(cfgLines, "tester") === true &&
+    ["filesystem", "shell", "tests", "engram", "codegraph"].every((t) =>
+      mod.getAgentTools(cfgLines, "tester").includes(t),
+    ),
+  `mutates=${mod.agentMutatesFiles(cfgLines, "tester")} tools=${mod.getAgentTools(cfgLines, "tester").join(",")}`,
+);
+// REQ-014: `REQUIRED_AGENTS` is what makes validation demand the agent, so an
+// installation that has not run `update` fails loudly instead of silently
+// running a workflow whose tester step is missing.
+const validateLabels = await mod.validate(cfgLines, cfgPath, tmp);
+check(
+  "config: validation requires the tester agent",
+  validateLabels.some((c) => c.label === 'agent "tester" exists' && c.ok),
+  validateLabels.filter((c) => c.label.includes("tester")).map((c) => `${c.label}=${c.ok}`).join(" | ") || "no tester check",
+);
+check(
+  "config: the shipped example ships the tester step too",
+  JSON.stringify(mod.getWorkflowSteps(exampleLinesForEngram, "full")) ===
+    JSON.stringify(["orchestrator", "explorer", "critic", "implementer", "tester", "delivery"]),
+  (mod.getWorkflowSteps(exampleLinesForEngram, "full") ?? []).join(" -> "),
+);
+// REQ-015: one predicate, two rules — it opens a repair round and it refuses
+// delivery. Tested directly because neither rule is reachable without driving
+// a pipeline, and a copy of this predicate in each would be how they diverge.
+check(
+  "declared failures: only a failed check counts, and a missing list is none",
+  mod.declaredFailedChecks([{ command: "a", result: "passed" }, { command: "b", result: "failed" }]).length === 1 &&
+    mod.declaredFailedChecks([{ command: "b", result: "failed" }])[0].command === "b" &&
+    mod.declaredFailedChecks([{ command: "c", result: "skipped" }]).length === 0 &&
+    mod.declaredFailedChecks(null).length === 0 &&
+    mod.declaredFailedChecks([]).length === 0,
+);
 check(
   "config: requirements_format defaults to sections and reads req-n",
   mod.getRequirementsFormat(["defaults:", "  workflow_mode: full"]) === "sections" &&
@@ -1531,9 +1580,11 @@ assistantTextOverride = "Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE";
 await mod.runPipeline(fakePi, makeCtx(tmp, true), "entrega", waitTurn, "full");
 assistantTextOverride = null;
 check(
+  // `full` is six steps since REQ-014 added the tester, so delivery is the
+  // sixth prompt, not the fifth.
   "skills: the delivery step receives its declared skill content in the step message",
-  sent.length === 5 && sent[4].includes("# GitHub Delivery"),
-  `sent=${sent.length} has=${sent[4]?.includes("# GitHub Delivery")}`,
+  sent.length === 6 && sent[5].includes("# GitHub Delivery"),
+  `sent=${sent.length} has=${sent[5]?.includes("# GitHub Delivery")}`,
 );
 // The example config is what `init` copies into an adopting project.
 const exampleLines = (await fs.readFile(path.join(ROOT, "harness.config.example.yaml"), "utf8")).split("\n");
@@ -2333,6 +2384,135 @@ check(
   "resume: the retry is judged on its own decision, so a silent retry fails closed",
   notifies.some((n) => n.includes("the orchestrator declared no decision")),
   notifies.join(" | "),
+);
+
+// --- REQ-014 / REQ-015: the tester step and the bounded repair round -------
+//
+// The round is driven from the `full` workflow, whose steps are
+// orchestrator, explorer, critic, implementer, tester, delivery. A command that
+// really exits 0 is used for the passing check, because the delivery gate
+// re-runs every declared check: a scripted "passed" that never ran would be
+// reported as contradicted and stop the run for the wrong reason.
+const passingCommand = `${nodeExec} -e "process.exit(0)"`;
+const reportWith = (checks, extra = {}) => ({
+  name: "harness_report",
+  params: { changed_files: [], checks, notes: "", lessons: [], ...extra },
+});
+const testerFailed = reportWith([{ command: passingCommand, result: "failed" }]);
+const testerPassed = reportWith([{ command: passingCommand, result: "passed" }]);
+// A scripted step owes a report like any other: `done` is the textual marker
+// the harness falls back to when the turn did not call `harness_report`.
+const said = (text) => `${text}\n\nHARNESS-DONE`;
+
+await fs.writeFile(cfgPath, forceFlags(baseCfg, { strict_decision_marker: true, preflight_policy: "advisory", workflow_mode: "full" }));
+
+// One failed round, then green: the pipeline reaches delivery.
+reset();
+assistantScript.push(
+  { text: "Plan.\n\nHARNESS-DECISION: PIPELINE" },
+  { text: said("Found it.") },
+  { text: said("Fine.") },
+  { text: said("Implemented.") },
+  { text: "A test fails.", tool: testerFailed },
+  { text: said("Fixed the cause.") },
+  { text: "Green.", tool: testerPassed },
+  { text: said("Delivered.") },
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "repair round", waitTurn);
+check(
+  "round: one failed round returns to the implementer and then reaches delivery",
+  sent.length === 8 &&
+    sent[5].includes("prompts/implementer.md") &&
+    sent[6].includes("prompts/tester.md") &&
+    sent[7].includes("prompts/delivery.md"),
+  `sent=${sent.length} ${sent.map((s) => (s.match(/prompts\/[\w-]+\.md/) ?? ["?"])[0]).join(",")}`,
+);
+// The failing command and its output reach the implementer as `{{previous}}`:
+// the tester's reply is already what the driver hands to the next step.
+check(
+  "round: the implementer receives the tester's failure as {{previous}}",
+  sent[5].includes("A test fails.") && !sent[5].includes("prompts/tester.md"),
+  String(sent[5]).slice(-160),
+);
+check(
+  "round: the explorer and the critic are not re-run",
+  sent.filter((s) => s.includes("prompts/explorer.md")).length === 1 &&
+    sent.filter((s) => s.includes("prompts/critic.md")).length === 1,
+  sent.map((s) => (s.match(/prompts\/[\w-]+\.md/) ?? ["?"])[0]).join(","),
+);
+check(
+  "round: a round that passes finishes the pipeline",
+  notifies.some((n) => n.includes('Pipeline "full" finished')) &&
+    notifies.some((n) => n.includes("Repair round 1/3")),
+  notifies.join(" | "),
+);
+
+// Three rounds and the fourth failure is the answer: no delivery.
+const exhaustScript = (extra = {}) => [
+  { text: "Plan.\n\nHARNESS-DECISION: PIPELINE" },
+  { text: said("Found it.") },
+  { text: said("Fine.") },
+  { text: said("Implemented.") },
+  { text: "Round 1 failure.", tool: reportWith([{ command: passingCommand, result: "failed" }], extra) },
+  { text: said("Fix 1.") },
+  { text: "Round 2 failure.", tool: reportWith([{ command: passingCommand, result: "failed" }], extra) },
+  { text: said("Fix 2.") },
+  { text: "Round 3 failure.", tool: reportWith([{ command: passingCommand, result: "failed" }], extra) },
+  { text: said("Fix 3.") },
+  { text: "Round 4 failure.", tool: reportWith([{ command: passingCommand, result: "failed" }], extra) },
+];
+
+reset();
+assistantScript.push(...exhaustScript());
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "rounds exhausted", waitTurn);
+// orchestrator, explorer, critic, implementer, then (implementer, tester) x 4.
+check(
+  "round: three rounds bound the repair and delivery never runs",
+  sent.length === 11 && !sent.some((s) => s.includes("prompts/delivery.md")),
+  `sent=${sent.length}`,
+);
+check(
+  "round: exhaustion names the bound and the failure as the final answer",
+  notifies.some((n) => n.includes("stopped after 3 repair rounds")) &&
+    notifies.some((n) => n.includes("there is no delivery")),
+  notifies.join(" | "),
+);
+// The stop is terminal and deliberately not resumable: resuming would point at
+// delivery, which is the one thing REQ-015 forbids after an exhausted round.
+check(
+  "round: exhaustion clears the stopped-pipeline record instead of offering a resume into delivery",
+  mod.readStoppedPipelineFromBranch(branchArr) === null &&
+    !notifies.some((n) => n.includes("/harness-resume")),
+  `stopped=${JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr))} ${notifies.join(" | ")}`,
+);
+
+// The counter is the driver's. A tester that claims otherwise does not get a
+// fourth round: the bound is unchanged because no tool writes it.
+reset();
+assistantScript.push(...exhaustScript({ repair_rounds: 99, reset: true }));
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "model tries to reset the counter", waitTurn);
+check(
+  "round: the model cannot reset the counter — extra fields in the report change nothing",
+  sent.length === 11 && !sent.some((s) => s.includes("prompts/delivery.md")),
+  `sent=${sent.length}`,
+);
+
+// A tester that declares nothing is not a failure: the pipeline proceeds, which
+// is what `checks: []` has to mean for the workflow to be usable at all.
+reset();
+assistantScript.push(
+  { text: "Plan.\n\nHARNESS-DECISION: PIPELINE" },
+  { text: said("Found it.") },
+  { text: said("Fine.") },
+  { text: said("Implemented.") },
+  { text: "Nothing to declare.", tool: reportWith([]) },
+  { text: said("Delivered.") },
+);
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "no declared checks", waitTurn);
+check(
+  "round: a tester that declares no checks does not open a repair round",
+  sent.length === 6 && sent[5].includes("prompts/delivery.md"),
+  `sent=${sent.length}`,
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

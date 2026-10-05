@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The tests are a step of their own, and they gate delivery.** The `full`
+  workflow is now `orchestrator -> explorer -> critic -> implementer -> tester
+  -> delivery`. The implementer makes the change and runs only the cheapest
+  check that proves it builds; a new `tester` agent writes the tests, runs the
+  project's checks and declares them in its `harness_report`. The harness
+  re-runs the **tester's** declared checks before delivery — the tester is the
+  last file-mutating step, so it is the checks the gate reads — and `tester` is
+  now a required agent, so an installation that has not been migrated fails
+  validation instead of silently running the old workflow.
+- **A failing test sends the work back to the implementer, bounded at three
+  rounds.** A check the `tester` declares `failed` opens a repair round: the
+  driver returns the failure to the `implementer` with the `tester`'s report
+  quoted as its `{{previous}}`, and runs the `tester` again. The `explorer` and
+  the `critic` are not re-run — the plan already exists, and re-deriving it
+  costs two turns to restate what is on disk. The counter lives in the driver,
+  so no step can reset it, and after three rounds the pipeline stops without
+  delivering: that stop is terminal and deliberately not resumable, because
+  resuming from it would hand over the very change its tests reject. A check
+  reported as `failed` now also refuses delivery outright, rather than only
+  when it fails again on the re-run.
+
+### Changed
+
+- `npx pi-minimal-harness update` migrates `workflows.full.steps`: a workflow
+  still carrying the previously shipped list gains `tester` before `delivery`,
+  and a customised list is left exactly as it is and reported instead, because
+  inserting a step into a workflow somebody reordered is the one edit an adopter
+  never asked for. **Run `update` after upgrading**: without it the `tester`
+  step is not in your workflow and validation reports the missing agent.
+- A `skipped` check stays a non-pass: it is reported as unverified rather than
+  blocking, and the delivery step is told so explicitly.
+
 - **An errored or interrupted pipeline leaves a way forward.** A step whose turn
   ends in a model error is retried once, and the retry is announced; an abort is
   not retried, because the user asked for it to stop. When a run still stops

@@ -51,6 +51,24 @@ mechanism, and the reference section above tells them to read this file.
   the harness reports the blocker instead of sending the step.
 - A step whose turn ends in a model error is retried once, and the retry is
   announced. An abort is not retried: the user asked for it to stop.
+- The tests are a step of their own (REQ-014). In the `full` workflow the
+  `tester` runs between the `implementer` and `delivery`: the implementer makes
+  the change and runs only the cheapest check that proves it builds, and the
+  tester writes the tests, runs the project's checks, and declares them in its
+  `harness_report`. The harness re-runs the **tester's** declared checks before
+  delivery — they are the gate, not the implementer's — and a check the tester
+  declares `failed` is never delivered. A declared `skipped` is **not** a pass:
+  it is reported as unverified. Only a `harness_report` carries inspectable
+  checks, so a step that ends on the `HARNESS-DONE` marker instead forfeits the
+  gate; `/harness-delivery` runs the delivery agent on its own and verifies
+  nothing.
+- A declared check that is `failed` opens a repair round (REQ-015): the driver
+  returns the failure to the `implementer` — quoting the tester's report as its
+  `{{previous}}` — and runs the `tester` again. The `explorer` and the `critic`
+  are not re-run, because the plan already exists. The counter is the driver's,
+  so no step can reset it, and after three rounds the pipeline stops **without**
+  delivery: that stop is terminal and deliberately not resumable, because
+  resuming would deliver the very change its tests reject.
 - A pipeline that stops with steps left records its state — the mode, the task,
   the steps that completed and the step it stopped on — and names two ways
   forward: `/harness-resume` continues from the step after the last completed
