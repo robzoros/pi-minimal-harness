@@ -83,6 +83,8 @@ const widgets = [];
 const branchArr = [];
 const assistantScript = [];
 const toolErrors = [];
+/** ctx.abort() calls recorded by command contexts in stop/end tests. */
+const aborts = [];
 /** Tool call to emit on the next assistant turn: { name, params, text }. */
 let pendingToolCall = null;
 /**
@@ -271,6 +273,7 @@ const reset = () => {
   assistantTurns = 0;
   pendingToolCall = null;
   toolErrors.length = 0;
+  aborts.length = 0;
   // The wait now reads idleness from the session: a leftover `false` would
   // send the next test into the wait's bound, so the flag is restored here.
   idle = true;
@@ -287,7 +290,7 @@ const reset = () => {
 // --- registration ------------------------------------------------------------
 check(
   "factory registers commands",
-  ["harness-config", "harness-mode", "harness-model", "harness-run", "harness-delivery", "harness-auto"].every((c) => c in commands),
+  ["harness-config", "harness-mode", "harness-model", "harness-run", "harness-stop", "harness-delivery", "harness-auto"].every((c) => c in commands),
   Object.keys(commands).join(","),
 );
 check(
@@ -2675,6 +2678,153 @@ reset();
     saw === false && Date.now() - started < 8000,
     `saw=${saw} elapsed=${Date.now() - started}`,
   );
+}
+
+// --- REQ-022: stop, end, and the mid-run refusal --------------------------------
+//
+// These tests drive the `input` hook, so they force auto-harness on: the
+// config has carried `auto_harness: false` since the `input: auto off` case
+// left it off and `baseCfg` was captured after that (every `forceFlags`
+// rewrite since preserves it).
+await fs.writeFile(cfgPath, (await fs.readFile(cfgPath, "utf8")).replace(/^ {2}auto_harness: .*$/m, "  auto_harness: true"));
+//
+// A stop is requested from inside a running turn through a scripted tool call
+// on the explorer's turn, the same way waitTurnInjecting scripts tool calls:
+// the tool executes while pipelineRunning is true, so the command handler sees
+// a real run in flight. The abort seam is attached per test; production binds
+// ctx.abort() to the Escape path.
+reset();
+{
+  const stopCtx = makeCtx(tmp, true);
+  stopCtx.abort = () => {
+    aborts.push("stop");
+  };
+  tools["test-stop-hook"] = {
+    execute: async () => {
+      await commands["harness-stop"].handler("", stopCtx);
+    },
+  };
+  assistantScript.push(
+    "Plan.\n\nHARNESS-DECISION: PIPELINE",
+    { text: "Exploring.\n\nHARNESS-DONE", tool: { name: "test-stop-hook", params: {} } },
+  );
+  await commands["harness-run"].handler("tarea con stop", makeCtx(tmp, true));
+  delete tools["test-stop-hook"];
+  const stopped = mod.readStoppedPipelineFromBranch(branchArr);
+  check(
+    "stop: a mid-run stop keeps a resumable record",
+    stopped !== null && stopped.completed.join(",") === "orchestrator" && stopped.failedStep === "explorer",
+    JSON.stringify(stopped),
+  );
+  check(
+    "stop: the stop is announced as the user's, not a model failure",
+    notifies.some((n) => n.includes("stopped by the user at step 2 (explorer)")),
+    notifies.join(" | ").slice(0, 220),
+  );
+  check("stop: the in-flight turn was aborted", aborts.join(",") === "stop", aborts.join(","));
+  check(
+    "stop: no further steps ran after the stop",
+    sent.length === 2 && sent[1]?.includes("prompts/explorer.md"),
+    `sent=${sent.length}`,
+  );
+}
+
+// Ending a run clears the record instead of writing one, and the next plain
+// message is routed by the orchestrator rather than refused.
+reset();
+{
+  const endCtx = makeCtx(tmp, true);
+  endCtx.abort = () => {
+    aborts.push("end");
+  };
+  tools["test-stop-hook"] = {
+    execute: async () => {
+      await commands["harness-end"].handler("", endCtx);
+    },
+  };
+  assistantScript.push(
+    "Plan.\n\nHARNESS-DECISION: PIPELINE",
+    { text: "Exploring.\n\nHARNESS-DONE", tool: { name: "test-stop-hook", params: {} } },
+  );
+  await commands["harness-run"].handler("tarea con end", makeCtx(tmp, true));
+  delete tools["test-stop-hook"];
+  check(
+    "end: a mid-run end clears the stopped record",
+    mod.readStoppedPipelineFromBranch(branchArr) === null,
+    JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+  );
+  check(
+    "end: the end is announced as returning control",
+    notifies.some((n) => n.includes("ended by the user") && n.includes("orchestrator")),
+    notifies.join(" | ").slice(0, 220),
+  );
+  sent.length = 0;
+  notifies.length = 0;
+  const routed = await events["input"]({ text: "siguiente tarea", source: "interactive" }, makeCtx(tmp, false));
+  const deadline = Date.now() + 10000;
+  while (!sent.some((s) => s.includes("prompts/orchestrator.md")) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check(
+    "end: the next plain message is routed by the orchestrator",
+    routed.action === "handled" && sent.some((s) => s.includes("prompts/orchestrator.md")),
+    `action=${routed.action} sent=${sent.length}`,
+  );
+  const settled = Date.now() + 15000;
+  while (sent.filter((s) => s.startsWith("[harness] step")).length < 6 && Date.now() < settled) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// /harness-end with only a recorded stop clears it without running anything.
+reset();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "tarea que se para", async () => false);
+check(
+  "end: precondition holds, a stop is recorded",
+  mod.readStoppedPipelineFromBranch(branchArr) !== null,
+  JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+);
+const stepsBeforeEnd = sent.length;
+await commands["harness-end"].handler("", makeCtx(tmp, true));
+check(
+  "end: clears a previous record and runs nothing",
+  mod.readStoppedPipelineFromBranch(branchArr) === null &&
+    notifies.some((n) => n.includes("Stopped pipeline discarded")) &&
+    sent.length === stepsBeforeEnd,
+  `sent=${sent.length} before=${stepsBeforeEnd} ${notifies.join(" | ").slice(0, 200)}`,
+);
+
+// A plain message while a pipeline streams is refused before the steering
+// pass-through, so it never reaches the current step's model; slash commands
+// still reach their handlers.
+reset();
+{
+  const first = await events["input"]({ text: "tarea larga", source: "interactive" }, makeCtx(tmp, false));
+  const refused = await events["input"](
+    { text: "oye, para un momento", source: "interactive", streamingBehavior: "steer" },
+    makeCtx(tmp, false),
+  );
+  check(
+    "run: a plain message while streaming is refused",
+    first.action === "handled" &&
+      refused.action === "handled" &&
+      notifies.some((n) => n.includes("/harness-stop") && n.includes("/harness-end")),
+    `first=${first.action} refused=${refused.action}`,
+  );
+  check(
+    "run: the refused message never reaches a step",
+    !sent.some((s) => s.includes("oye, para un momento")),
+    `sent=${sent.length}`,
+  );
+  const slash = await events["input"](
+    { text: "/harness-mode", source: "interactive", streamingBehavior: "steer" },
+    makeCtx(tmp, false),
+  );
+  check("run: slash commands still reach their handlers", slash.action === "continue", `slash=${slash.action}`);
+  const done = Date.now() + 15000;
+  while (sent.filter((s) => s.startsWith("[harness] step")).length < 6 && Date.now() < done) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 await fs.rm(tmp, { recursive: true, force: true });

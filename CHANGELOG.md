@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Users can stop or end a running pipeline (REQ-022).** `/harness-stop` aborts
+  the current turn and keeps the stopped run resumable; `/harness-end` clears a
+  running or stopped pipeline and returns control to the orchestrator. Plain
+  messages during a pipeline are refused rather than steered into the current
+  step.
 - **Pipeline steps wait for their own assistant turn (REQ-021).** Command-driven
   runs no longer treat an already-idle session as a completed step; the driver
   waits for a new complete turn from a baseline captured before sending and

@@ -93,18 +93,21 @@ pull requests that close the issue the work belongs to.
 - A step whose turn ends in a model error is retried once (`STEP_RETRY_LIMIT`)
   and the retry is announced; an abort is not retried. A pipeline that stops
   with steps left records `mode`, `task`, `steps`, `completed` and `failedStep`
-  in its own `appendEntry` custom entry and names two exits:
-  `/harness-resume` continues from the step after the last completed one
-  without re-running them or the orchestrator, and `/harness-delivery`
-  delivers what is verified. Both clear the record, as does a forced
-  `/harness-run`, which abandons the stopped run; so while one is recorded a
-  plain message is refused with those two exits named rather than silently
-  re-running the whole workflow — unless `auto_harness` is off, in which case
-  the stop is reported and the message is let through, since nothing would have
-  turned it into a pipeline. A resume skips the blocking preflight, whose
-  blocker would be the partial work being resumed. A retried step is judged on
-  its own decision: a decision emitted by an attempt that then failed does not
-  survive into the retry.
+  in its own `appendEntry` custom entry. `/harness-stop` aborts the current turn
+  and keeps this resumable record; `/harness-resume` continues from the step
+  after the last completed one without re-running them or the orchestrator, and
+  `/harness-delivery` delivers what is verified. `/harness-end` aborts a running
+  pipeline or clears a stopped record, closes an open design session and returns
+  control to the orchestrator. While a pipeline is streaming, plain messages
+  are refused with `/harness-stop` and `/harness-end` named rather than being
+  steered into the current step. While a run is stopped, the resume/delivery/end
+  exits are named rather than silently re-running the whole workflow — unless
+  `auto_harness` is off, in which case the stop is reported and the message is
+  let through, since nothing would have turned it into a pipeline. A forced
+  `/harness-run` abandons the stopped run. A resume skips the blocking preflight,
+  whose blocker would be the partial work being resumed. A retried step is
+  judged on its own decision: a decision emitted by an attempt that then failed
+  does not survive into the retry.
 - Exploration and memory are reachable in every mode, not only in `full`:
   `codegraph` is granted to the `architect`, `explorer` and `implementer`, and
   `engram` to those three and the `critic`, and the prompt templates name

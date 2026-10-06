@@ -37,7 +37,7 @@ workflow you can actually audit.
 | Router | The orchestrator sends a question or an idea to the `analysis` workflow (`orchestrator -> architect`), and a closed requirements contract down `full` |
 | Report guarantee | Every step that owes a report calls `harness_report` with all its fields (fallback: ends with `HARNESS-DONE`); an incomplete report earns one repair turn per step, and the pipeline stops if it is still incomplete |
 | Control tools | `harness_decision` and `harness_report` replace the textual markers as the primary signal; the markers stay as a one-release fallback |
-| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-resume`, `/harness-delivery`, `/harness-auto` |
+| Interactive commands | `/harness-config`, `/harness-mode`, `/harness-model` (model + effort), `/harness-run`, `/harness-stop`, `/harness-end`, `/harness-resume`, `/harness-delivery`, `/harness-auto` |
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs; each subagent's system prompt is its own prompt template, its declared project skills, the harness contract and the project's `AGENTS.md` (when present, read last so project rules win) |
@@ -389,16 +389,20 @@ the steps that completed and the step it stopped on, and names two ways forward:
   verified.
 
 While such a stop is recorded, a plain message is **not** started as a new
-pipeline: the harness reports the stopped step and points at both exits. Both
-exits clear the record, so this never leaves the session stuck. A forced
-`/harness-run` is a third exit — it starts a new task from the first step — so it
-abandons the stopped run, says so, and clears the record rather than letting the
-new run overwrite it. With `defaults.auto_harness: false` the harness only
-*reports* the stop and lets the message through to the model, because that
-message is the user's and nothing would have replaced it with a pipeline. A run
-that finishes normally, answers directly (`ANSWER_ONLY`) or is blocked by the
-critic records nothing, because those are finished runs rather than
-interruptions.
+pipeline: the harness reports the stopped step and points at `/harness-resume`,
+`/harness-delivery` and `/harness-end`. `/harness-stop` interrupts a running
+pipeline and keeps a resumable record; `/harness-end` interrupts it (if running),
+clears any stop record, closes an open design session and returns control to the
+orchestrator. Plain messages sent while a pipeline is streaming are refused
+rather than steered into its current step. `/harness-resume` and
+`/harness-delivery` consume the stopped record. A forced `/harness-run` is
+another exit — it starts a new task from the first step — so it abandons the
+stopped run, says so, and clears the record rather than letting the new run
+overwrite it. With `defaults.auto_harness: false` a recorded stop is reported
+but the plain message is let through to the model, because nothing would have
+replaced it with a pipeline. A run that finishes normally, answers directly
+(`ANSWER_ONLY`) or is blocked by the critic records nothing, because those are
+finished runs rather than interruptions.
 
 The record is written with `pi.appendEntry()` and read back from the active
 branch, so it survives `/reload` and never enters the model context. A resume
@@ -414,10 +418,11 @@ unaffected, so a dirty tree is never hidden.
 | `/harness-mode [mode]` | Show or change `defaults.workflow_mode` |
 | `/harness-model [agent [model-id [effort]]]` | Interactively change models/efforts for one or more agents; arguments are one-shot |
 | `/harness-run <task>` | Force the pipeline for one task |
+| `/harness-stop` | Stop the running pipeline and keep its completed steps resumable |
 | `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-resume [note]` | Continue the pipeline that stopped with steps left, from the step after the last completed one. `/harness-resume`, `/harness-delivery` and `/harness-run` all consume the recorded stop |
 | `/harness-validate [note]` | Approve the architect's proposal: the architect owns the issues, so it creates the one (or ones) the approved scope needs and records the number in each requirement, writes the agreed content to the requirements file, and **keeps the design session open** |
-| `/harness-end` | Close the design session; the next plain message is routed by the orchestrator again. An architect step opens it implicitly — the user, never a model, closes it |
+| `/harness-end` | End a pipeline or close the architect's design session; the next plain message is routed by the orchestrator again |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
 | `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply — fallback for when `harness_decision` is unavailable |
 | `HARNESS-DONE` | Fallback completion marker for every non-orchestrator agent reply |

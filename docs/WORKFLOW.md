@@ -349,9 +349,13 @@ selection, the agent menu is shown again so multiple agents can be configured;
 validate the same combination before applying it.
 
 Native project commands are registered by `.pi/extensions/harness.ts`:
-`/harness-config`, `/harness-mode`, `/harness-model`, `/harness-run` and
-`/harness-auto`. The former skill fallbacks (`/skill:harness-*` and
-`$harness-*`) no longer exist; use the native commands.
+`/harness-config`, `/harness-mode`, `/harness-model`, `/harness-run`,
+`/harness-stop`, `/harness-end`, `/harness-resume`, `/harness-delivery` and
+`/harness-auto`. `/harness-stop` interrupts a running pipeline while keeping it
+resumable; `/harness-end` abandons a stopped or running pipeline and returns
+control to the orchestrator. Plain messages during a running pipeline are
+refused rather than sent to its current agent. The former skill fallbacks
+(`/skill:harness-*` and `$harness-*`) no longer exist; use the native commands.
 
 The command interface is a thin layer over `.agents/harness/harness.config.yaml`
 and the workflow files. It should update configuration, not duplicate it.
