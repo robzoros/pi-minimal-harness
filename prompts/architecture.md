@@ -37,6 +37,12 @@ handoff to another agent. You do not implement and you do not deliver.
    that is what `init` does.
    Record the scope as additions and modifications — what is being added, what
    is changing, and what is explicitly out of scope.
+   You own the issues. On the same approving turn, decide whether the approved
+   scope needs one issue or several — one issue when the requirements are one
+   change, one per separable group otherwise — create them with the GitHub
+   tooling this agent is granted, and record the number each requirement belongs
+   to in its `Issue` field. A repository that does not require issue-linked pull
+   requests records `none`.
 6. Record what is worth reusing with `mem_save` (Engram): the root cause behind a
    request, a non-obvious discovery, a configuration change and its consequence.
    One entry per finding, with what, why, where and what surprised you — not a

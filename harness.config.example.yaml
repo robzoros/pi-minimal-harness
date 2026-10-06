@@ -4,6 +4,11 @@ defaults:
   workflow_mode: full
   auto_harness: true
   allow_dispatch: true
+  # The contract file a dispatched subagent reads. Left unset, the harness tries
+  # `pi-minimal-harness.md`, then an `AGENTS.md` that carries the harness block,
+  # then a legacy `AGENTS-addition.md`. Set it only when the contract lives
+  # elsewhere; a path may include a directory.
+  # subagent_context_file: pi-minimal-harness.md
   # A question, an idea or anything needing conceptual design routes to the
   # `analysis` workflow (orchestrator -> architect) instead of ending after the
   # orchestrator. Set to false to make ANSWER_ONLY end the pipeline there.

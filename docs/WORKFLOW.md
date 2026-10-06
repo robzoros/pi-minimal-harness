@@ -79,6 +79,9 @@ Responsibilities:
 - maintain `defaults.requirements_file` — but **write it only when the user
   approves**, with `/harness-validate`, in the shape `requirements_format`
   chooses;
+- own the issues: on the approving turn, decide whether the approved scope needs
+  one issue or several, create them with the GitHub tooling it is granted, and
+  record the number each requirement belongs to;
 - record what is worth reusing with `mem_save`;
 - open and close its own multi-turn session.
 

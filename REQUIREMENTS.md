@@ -39,7 +39,11 @@ test routed back to the implementer, and a pipeline that can be resumed after a
 step error — the last one after a run stalled mid-flight and left
 implemented-but-undelivered work with no way to act on it. REQ-017 follows
 Engram itself: the pipeline writes to it on every run and instructs nobody to
-read it, so the memories accumulate unread.
+read it, so the memories accumulate unread. REQ-018 syncs the published surface
+with what the implementation and the installer already do, after REQ-014 added
+the tester and the package gained its `bin`. REQ-019 stops the requirements file
+the architect writes from counting as a dirty tree. REQ-020 states the
+architect's issue duty where the architect actually reads it.
 
 ## Additions
 
@@ -578,6 +582,155 @@ read it, so the memories accumulate unread.
 - **Priority**: P2
 - **Status**: `IMPLEMENTED`
 
+### REQ-018 — The published surface matches what the harness actually does
+
+- **Statement**: The published documentation shall describe the harness as it
+  now exists. `README.md` shall list all seven agent prompt templates, shall
+  show the `tester` step in the `workflows.full.steps` configuration reference,
+  shall describe the contract as the separate `pi-minimal-harness.md` file the
+  installer writes and that `AGENTS.md` merely references, shall state the
+  current counts of the two test suites, and shall document the
+  `workflows.full.steps` migration that `update` performs.
+  `harness.config.example.yaml` shall carry a commented example of
+  `defaults.subagent_context_file` with its default value explained, leaving the
+  key undefined, and the repository's `AGENTS.md` shall stop stating that the
+  repository has no `package.json`.
+- **Rationale**: the implementation is ahead of its own front door. REQ-014
+  added the `tester` agent and its step, `update` grew the migration that
+  inserts it, and the package gained a `bin` — and none of that reached the
+  published surface. An adopter who reads the configuration reference copies a
+  five-step `full` workflow and never learns the tester exists; one who reads
+  the install instructions is told the installer writes "the AGENTS.md
+  contract" when the contract is a file of its own; and a reader of
+  `AGENTS.md` is told there is no `package.json` in a repository that now
+  publishes one. The example template is what `init`/`update` merge from, so
+  omitting `subagent_context_file` there means the key the README documents can
+  never reach a fresh installation. The example is commented rather than active
+  because the resolution chain already falls back to `pi-minimal-harness.md`, so
+  an active value would duplicate the default; the key only matters when a
+  project keeps its contract elsewhere, so the template documents it as an opt-in
+  example instead of shipping a redundant value. Documentation that contradicts the code is
+  worse than absent documentation: it is trusted.
+- **Acceptance**:
+  - [ ] The README's prompt-template list names all seven templates —
+        `architect`, `orchestrator`, `explorer`, `critic`, `implementer`,
+        `tester`, `delivery` — and its project tree lists `tester.md` and
+        `architecture.md`.
+  - [ ] The README's configuration reference shows
+        `full: { steps: [orchestrator, explorer, critic, implementer, tester, delivery] }`,
+        matching `harness.config.yaml`.
+  - [ ] The README describes the contract as a file of its own that `AGENTS.md`
+        references, and no phrase calls `AGENTS.md` itself the contract.
+  - [ ] The README's test counts match the current output of
+        `node tests/harness.test.mjs` and `node tests/install.test.mjs`.
+  - [ ] The README's configuration reference documents `requirements_format`,
+        `check_timeout_ms` and `subagent_context_file`, the `defaults` keys the
+        example template ships.
+  - [ ] The README's upgrade section states that `update` migrates
+        `workflows.full.steps` to insert `tester`.
+  - [ ] `harness.config.example.yaml` carries a commented
+        `defaults.subagent_context_file` example with the default value explained,
+        and the key is left undefined.
+  - [ ] `AGENTS.md` no longer states there is no `package.json`, and names the
+        published `bin` where it describes the repository's files.
+  - [ ] Only `README.md`, `AGENTS.md` and `harness.config.example.yaml` change:
+        no loader, driver, prompt or installer behaviour is touched, and no new
+        test is required because the change is prose and one config key.
+- **Traces**: `README.md`, `AGENTS.md`, `harness.config.example.yaml`
+- **Issue**: #35
+- **Priority**: P2
+- **Status**: `IMPLEMENTED`
+
+### REQ-019 — The requirements file does not count as a dirty tree
+
+- **Statement**: The harness shall not treat the configured requirements file as
+  a dirty working tree when it computes the repository preflight. When the only
+  paths the working tree changed under `HEAD` — tracked modifications and
+  untracked files alike — are the file named by `defaults.requirements_file`,
+  the advisory preflight shall report nothing and the blocking gate shall have no
+  blocker; any other changed path shall restore both behaviours unchanged. The
+  rule shall be decided by path, not by step or mode, so it holds for the
+  architect step, for the `analysis` mode and for every other workflow alike.
+- **Rationale**: a design session's normal output is the requirements file
+  itself. The architect writes it only on approval, and while the session stays
+  open every plain message is another architect turn — each turn its own
+  pipeline — so the preflight runs again and warns about the very change the user
+  just approved; under `defaults.preflight_policy: blocking` the same file stops a
+  subsequent run. The architect is already exempt from the blocking gate
+  (`ARCHITECT_AGENT`), but that exemption is by step: it hides a genuinely dirty
+  tree from the architect while still warning about a tree whose only difference
+  is harness-owned output. The requirements file is not unknown work someone left
+  behind — it is the artifact the harness instructed the architect to write and
+  the user approved — so it is the wrong reason to warn or to block. Deciding by
+  path is what keeps the rest of the preflight intact: a second changed file,
+  even alongside the requirements file, restores the warning.
+- **Acceptance**:
+  - [ ] When the changed paths (`git diff --name-only HEAD` plus untracked
+        files, as `collectChangedPaths` already gathers them) are exactly the
+        configured requirements file, the advisory preflight returns null and
+        `formatBlockingPreflight` returns no blockers.
+  - [ ] Any other changed or untracked path restores the warning and the
+        blocker, with the requirements file present or not.
+  - [ ] The rule depends on the path, not on the agent or the mode: it applies
+        to the architect step without an `ARCHITECT_AGENT`/`ANALYSIS_MODE`
+        special case.
+  - [ ] The configured name is honoured, including a directory in it
+        (`docs/REQ.md`), and a `requirements_file` that is not among the changed
+        paths changes nothing.
+  - [ ] The extra git work is conditional on the repository already being
+        dirty, so a clean tree pays no additional command.
+  - [ ] Paths are compared in the same normalized (forward-slash) form
+        `collectChangedPaths` emits, so the rule does not depend on the platform
+        separator.
+  - [ ] The decision lives in a pure, exported helper, and
+        `tests/harness.test.mjs` covers: only the requirements file dirty → no
+        warning and no blocker; the file plus one code path dirty → both
+        return; a clean tree is unaffected.
+  - [ ] REQ-016's resume exemption is unchanged, and the blocking gate still
+        stops on every other blocker it already reports.
+- **Traces**: `.pi/extensions/harness.ts` (`runPipeline`, `collectChangedPaths`,
+  the preflight formatters or a new pure helper), `tests/harness.test.mjs`
+- **Issue**: #35
+- **Priority**: P2
+- **Status**: `IMPLEMENTED`
+
+### REQ-020 — The architect's prompt states the issue duty it is expected to perform
+
+- **Statement**: `prompts/architecture.md` shall instruct the architect, on
+  `/harness-validate`, to decide whether the approved scope needs one issue or
+  several, to create them with the granted GitHub tooling, and to report which
+  issue each requirement belongs to. `pi-minimal-harness.md`, `README.md` and
+  `docs/WORKFLOW.md` shall state that the architect owns the issues.
+- **Rationale**: REQ-011 gave the architect the `github` grant and left the
+  orchestrator tool-less, but the architect's own prompt never names the duty —
+  it has zero mentions of "issue" — and the published contract and the
+  README/workflow docs never state the ownership either, although REQ-011's
+  acceptance required it of them. The duty therefore exists only as implemented
+  terminal requirement text, which the model never reads at step time; the
+  prompt — the only channel the architect reads — is silent, so the grant goes
+  unused and the user has to ask for the issue. Instructions live where the step
+  reads them: the issue duty is an architect-step instruction, and it belongs in
+  the architect's prompt and the contract the step points at.
+- **Acceptance**:
+  - [ ] `prompts/architecture.md` names the duty: on `/harness-validate`,
+        decide one issue or one per separable group, create them with the granted
+        GitHub tooling, and record the number in each requirement block.
+  - [ ] `pi-minimal-harness.md` states that the architect owns the issues.
+  - [ ] `README.md` and `docs/WORKFLOW.md` say the same, closing the unmet
+        half of REQ-011's acceptance criterion.
+  - [ ] A repository that does not require issue-linked pull requests keeps
+        working with `none`: REQ-011's rule is unchanged, only now stated where
+        it is read.
+  - [ ] No harness code change: the grant and the GitHub tool already exist;
+        this is prose that makes them reachable.
+  - [ ] `tests/harness.test.mjs` asserts the prompt names the duty, a content
+        check in the style REQ-017 uses for the Engram read.
+- **Traces**: `prompts/architecture.md`, `pi-minimal-harness.md`, `README.md`,
+  `docs/WORKFLOW.md`, `tests/harness.test.mjs`
+- **Issue**: #35
+- **Priority**: P2
+- **Status**: `IMPLEMENTED`
+
 ## Modifications
 
 - `prompts/orchestrator.md` — REQ-008 and REQ-011: route and hand over, without
@@ -627,6 +780,19 @@ read it, so the memories accumulate unread.
 - `AGENTS.md`, `pi-minimal-harness.md`, `README.md`, `docs/WORKFLOW.md`,
   `CHANGELOG.md` — the published surface follows the change, including the
   read-before-work duty REQ-017 adds to the contract's memory section.
+- `README.md`, `AGENTS.md`, `harness.config.example.yaml` — REQ-018: the
+  published surface catches up with what the implementation and the installer
+  already do after REQ-014 and the published `bin` — the seven prompts, the
+  tester step, the contract as its own file, the current test counts, the
+  missing `defaults` keys and the `workflows.full.steps` migration.
+- `.pi/extensions/harness.ts` (`runPipeline`, the preflight helpers) and
+  `tests/harness.test.mjs` — REQ-019: the requirements file the architect just
+  wrote is project-owned output, not unknown work, so it no longer counts as a
+  dirty tree for the advisory warning or the blocking gate.
+- `prompts/architecture.md`, `pi-minimal-harness.md`, `README.md`,
+  `docs/WORKFLOW.md`, `tests/harness.test.mjs` — REQ-020: the architect's
+  prompt names the issue duty it is expected to perform, and the contract and
+  the docs state that the architect owns the issues.
 
 ## Out of scope
 

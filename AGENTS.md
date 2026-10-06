@@ -9,6 +9,8 @@ the Pi coding agent, published for use in other people's projects.
 | Path | Purpose |
 |---|---|
 | `README.md` | Public front door: inspiration, install, configuration, commands, skills. |
+| `bin/pi-minimal-harness.mjs` | The published installer: `npx pi-minimal-harness init\|update` copies the harness into an adopting project. |
+| `package.json` | The npm package: the `bin` entry above, no dependencies, no build step. |
 | `pi-minimal-harness.md` | The generic harness contract, copied verbatim to the root of every adopting project and pointed at from their `AGENTS.md`. |
 | `harness.config.yaml` | Single source of truth: `defaults` (mode, auto-harness, short-circuit, dispatch gate, contract file), `commands`, `workflows` (mode → agent steps), `agents` (model, reasoning, tools, prompt template), `skills`. |
 | `.pi/extensions/harness.ts` | The Pi extension: `/harness-*` commands, footer status, auto-harness input hook, pipeline driver, validation, dispatch tool, and the control tools (`harness_decision`, `harness_report`). |
@@ -18,9 +20,12 @@ the Pi coding agent, published for use in other people's projects.
 | `tests/harness.test.mjs`, `tests/install.test.mjs` | Node smoke tests. |
 | `CHANGELOG.md`, `LICENSE` | Keep a Changelog + MIT. |
 
-There is **no** `package.json` and no `src/`: the adopting application's
-lint/test/cargo gates do not apply here. A git repository exists but has no
-commits or remote yet (delivery requires deciding `.gitignore` policy first).
+There is **no** `src/` build: the adopting application's lint/test/cargo gates do
+not apply here. The `package.json` is only the published `bin`
+(`bin/pi-minimal-harness.mjs`, the `init`/`update` installer); the harness itself
+is the extension plus its configuration. The repository has a remote, `origin`
+(`git@github.com:robzoros/pi-minimal-harness.git`), and work is delivered through
+pull requests that close the issue the work belongs to.
 
 ## How the harness works
 

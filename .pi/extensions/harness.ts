@@ -1342,6 +1342,33 @@ export async function collectChangedPaths(
 }
 
 /**
+ * REQ-019: the changed paths that make the tree dirty for a reason other than
+ * the configured requirements file.
+ *
+ * A design session's normal output is that file, and the harness itself
+ * instructed the architect to write it: warning that the tree is dirty, or
+ * blocking a run, because the user approved a requirement is warning about the
+ * harness's own artifact. Nothing else is excused — a second changed path, even
+ * beside the requirements file, restores both behaviours, because only the
+ * harness's artifact is the harness's to reason about.
+ *
+ * Pure and exported so the rule is testable without a repository. `changedPaths`
+ * is what `collectChangedPaths` returned — repo-root-relative, forward slashes.
+ * The configured name may carry a directory (`docs/REQ.md`), and a project may
+ * sit below the repository root, so a path that ends with `/<file>` matches too.
+ */
+export function pathsBeyondRequirements(changedPaths: string[], requirementsFile: string): string[] {
+  const normalize = (value: string): string =>
+    value.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  const wanted = normalize(requirementsFile);
+  const suffix = `/${wanted}`;
+  return changedPaths.filter((path) => {
+    const candidate = normalize(path);
+    return candidate !== wanted && !candidate.endsWith(suffix);
+  });
+}
+
+/**
  * The declared checks a step reported as `failed`.
  *
  * One place, because two rules depend on the same predicate and disagreeing
@@ -1569,7 +1596,15 @@ if (!steps || steps.length === 0) {
   ctx.ui.notify(`workflows has no steps for mode "${mode}" — cannot run the pipeline.`, "error");
   return;
 }
-  const repositoryState = await checkRepositoryState(ctx.cwd);
+  // REQ-019: the requirements file the architect just wrote is the harness's own
+  // artifact, not unknown work, so a tree whose only change is that file is not
+  // dirty. Every other changed path still is. The path listing only runs when
+  // git already called the tree dirty, so a clean tree pays no extra command.
+  let repositoryState = await checkRepositoryState(ctx.cwd);
+  if (repositoryState.dirty) {
+    const beyondRequirements = pathsBeyondRequirements(await collectChangedPaths(ctx.cwd), getRequirementsFile(lines));
+    if (beyondRequirements.length === 0) repositoryState = { ...repositoryState, dirty: false };
+  }
   const repositoryWarning = formatRepositoryPreflight(repositoryState);
   if (repositoryWarning) ctx.ui.notify(repositoryWarning, "warning");
 

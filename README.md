@@ -41,9 +41,9 @@ workflow you can actually audit.
 | Footer status | `harness: <mode> [· step] [· decision: …] · auto: on\|off` |
 | Auto-harness | Plain (non-slash) requests run through the pipeline; `/harness-auto off` to disable |
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs; each subagent's system prompt is its own prompt template, its declared project skills, the harness contract and the project's `AGENTS.md` (when present, read last so project rules win) |
-| Installer | `npx pi-minimal-harness init` installs resources, prompts, delivery skill, local config, and the AGENTS.md contract |
+| Installer | `npx pi-minimal-harness init` installs the extension, prompts, delivery skill, local config, and the `pi-minimal-harness.md` contract; `AGENTS.md` gets a reference to it |
 | Upgrade | `npx pi-minimal-harness update` refreshes upstream files and **only adds** missing keys to your config |
-| Tests | `node tests/harness.test.mjs` (196 checks) and `node tests/install.test.mjs` (15 installer tests) |
+| Tests | `node tests/harness.test.mjs` (308 checks) and `node tests/install.test.mjs` (23 installer tests) |
 
 ## Install in your Pi project
 
@@ -58,12 +58,14 @@ your-project/
 │   └── extensions/
 │       └── harness.ts          # the whole harness (commands, driver, dispatch)
 ├── harness.config.yaml         # modes, agents, models, gates
-├── prompts/                    # the six agent prompt templates
+├── prompts/                    # the seven agent prompt templates
 │   ├── orchestrator.md
 │   ├── explorer.md
 │   ├── critic.md
-│   └── implementer.md
+│   ├── implementer.md
+│   ├── tester.md
 │   ├── delivery.md
+│   └── architecture.md
 ├── .agents/
 │   ├── skills/
 │   │   └── github-delivery/SKILL.md
@@ -178,11 +180,19 @@ Pass `--project /path/to/project` to update a project without changing
 directory; without it `update` works on the current directory.
 
 `update` replaces everything Pi executes — the extension, the prompts, the
-delivery skill and the `AGENTS.md` contract block — and **only adds** the keys
-a newer release introduced to your `harness.config.yaml`. It never overwrites a
-value you set, never removes a key and never rewrites a YAML sequence. The
-guarantee in one line: *update replaces what Pi runs and only adds keys to your
-configuration*.
+delivery skill and the `pi-minimal-harness.md` contract — and **only adds** the
+keys a newer release introduced to your `harness.config.yaml`. It never
+overwrites a value you set, never removes a key and never rewrites a YAML
+sequence. The guarantee in one line: *update replaces what Pi runs and only adds
+keys to your configuration*.
+
+One migration is the deliberate exception: `workflows.full.steps` still carrying
+the five-step list earlier releases shipped gains the `tester` step before
+`delivery`, because the additive merge never rewrites a sequence and without the
+migration the agent would be added but never run. A workflow you reordered or
+trimmed yourself is left exactly as it is and reported instead — inserting a
+step into a workflow somebody customised is the one edit an adopter never asked
+for. Run `update` after upgrading; `/harness-config` validates the result.
 
 ```text
   add defaults.preflight_policy in harness.config.yaml
@@ -294,14 +304,17 @@ defaults:
   auto_harness: true             # plain requests run through the pipeline
   analysis_routing: true         # the orchestrator's ANSWER_ONLY routes to the architect
   requirements_file: REQUIREMENTS.md  # where the architect keeps the formal scope
+  requirements_format: sections  # sections | req-n — the shape init writes
   allow_dispatch: true           # enable the harness-dispatch tool
-                                   # subagent contract: defaults.subagent_context_file
-                                   # if it exists, else pi-minimal-harness.md,
-                                   # else an AGENTS.md carrying the harness block
+  # subagent_context_file: pi-minimal-harness.md  # contract a dispatched subagent reads
+                                   # left unset, the harness falls back to
+                                   # pi-minimal-harness.md, then an AGENTS.md
+                                   # carrying the harness block
+  check_timeout_ms: 300000       # how long a reported check may run (5 min)
   strict_decision_marker: true   # stop when the orchestrator emits no decision
   preflight_policy: advisory     # advisory | blocking (blocking gates file-mutating steps)
 workflows:
-  full: { steps: [orchestrator, explorer, critic, implementer, delivery] }
+  full: { steps: [orchestrator, explorer, critic, implementer, tester, delivery] }
 agents:
   orchestrator:
     model: provider/model-id     # exact id from /models
@@ -403,7 +416,7 @@ unaffected, so a dirty tree is never hidden.
 | `/harness-run <task>` | Force the pipeline for one task |
 | `/harness-delivery [instructions]` | Run only the delivery agent without changing `defaults.workflow_mode` |
 | `/harness-resume [note]` | Continue the pipeline that stopped with steps left, from the step after the last completed one. `/harness-resume`, `/harness-delivery` and `/harness-run` all consume the recorded stop |
-| `/harness-validate [note]` | Approve the architect's proposal: it writes the agreed content to the requirements file and **keeps the design session open** |
+| `/harness-validate [note]` | Approve the architect's proposal: the architect owns the issues, so it creates the one (or ones) the approved scope needs and records the number in each requirement, writes the agreed content to the requirements file, and **keeps the design session open** |
 | `/harness-end` | Close the design session; the next plain message is routed by the orchestrator again. An architect step opens it implicitly — the user, never a model, closes it |
 | `/harness-auto [on\|off]` | Plain requests → pipeline |
 | `HARNESS-DECISION: ANSWER_ONLY\|PIPELINE` | Orchestrator's decision, on the last line of its reply — fallback for when `harness_decision` is unavailable |
