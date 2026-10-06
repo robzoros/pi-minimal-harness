@@ -70,22 +70,25 @@ mechanism, and the reference section above tells them to read this file.
   delivery: that stop is terminal and deliberately not resumable, because
   resuming would deliver the very change its tests reject.
 - A pipeline that stops with steps left records its state — the mode, the task,
-  the steps that completed and the step it stopped on — and names two ways
-  forward: `/harness-resume` continues from the step after the last completed
-  one without re-running the earlier steps (and therefore without re-running
-  the orchestrator, which would lose the issue the run carried), and
-  `/harness-delivery` delivers what is already verified. While such a stop is
-  recorded, a plain message is not turned into a new pipeline: the harness says
-  a pipeline stopped and points at both exits. Both exits clear the record, as
-  does a forced `/harness-run`, which abandons the stopped run because it starts
-  a new task from the first step. With `defaults.auto_harness: false` a recorded
-  stop is reported but the plain message is let through: it is the user's, and
-  nothing would have turned it into a pipeline.
+  the steps that completed and the step it stopped on — and offers
+  `/harness-resume` to continue from the step after the last completed one
+  without re-running the earlier steps (and therefore without re-running the
+  orchestrator, which would lose the issue the run carried), or
+  `/harness-delivery` to deliver what is already verified. `/harness-stop`
+  aborts a running step and keeps that resumable record. `/harness-end` aborts
+  a running pipeline or clears a stopped record, closes an open design session,
+  and returns control to the orchestrator. While a pipeline is streaming, plain
+  messages are refused rather than steered into its current step; use
+  `/harness-stop` or `/harness-end` first. A forced `/harness-run` also abandons
+  a stopped run because it starts a new task from the first step. With
+  `defaults.auto_harness: false`, a recorded stop is reported but a plain message
+  is let through only when no pipeline is running: nothing would have turned it
+  into a pipeline.
 - Commands: `/harness-config`, `/harness-mode`, `/harness-model` (model plus
-  supported reasoning effort), `/harness-run <task>`, `/harness-resume
-  [note]`, `/harness-delivery
-  [instructions]`, `/harness-auto [on|off]`, `/harness-validate [note]` and
-  `/harness-end`. `/harness-delivery` runs the delivery agent without changing
+  supported reasoning effort), `/harness-run <task>`, `/harness-stop`,
+  `/harness-end`, `/harness-resume [note]`, `/harness-delivery [instructions]`,
+  `/harness-auto [on|off]` and `/harness-validate [note]`.
+  `/harness-delivery` runs the delivery agent without changing
   `defaults.workflow_mode`.
 - The orchestrator routes the task with the `harness_decision` tool, once at
   the end of its turn: `ANSWER_ONLY` (a question, an idea, or anything needing

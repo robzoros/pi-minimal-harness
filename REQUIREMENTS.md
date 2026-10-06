@@ -828,7 +828,7 @@ step before its turn existed, the second adds `/harness-stop` and
   `AGENTS.md`, `docs/WORKFLOW.md`, `CHANGELOG.md`
 - **Issue**: #39
 - **Priority**: P1
-- **Status**: `DRAFT`
+- **Status**: `IMPLEMENTED`
 
 ## Modifications
 

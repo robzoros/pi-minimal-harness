@@ -107,6 +107,8 @@ let lastReport: HarnessReport | null = null;
 
 /** True while a pipeline is running: the harness tools are inert outside one. */
 let pipelineActive = false;
+/** User-requested exit, consumed by the active driver before it records the stop. */
+let stopIntent: "stop" | "end" | null = null;
 
 /**
  * True while the architect holds a multi-turn session: the user's next inputs
@@ -1205,7 +1207,12 @@ export async function awaitStepTurn(
       lastProgress = Date.now();
       sawAssistant = true;
     }
-    if (sawAssistant && !lastAssistantHasToolCall(ctx) && ctx.isIdle()) return true;
+    if (sawAssistant && ctx.isIdle()) {
+      // Once idle, no further tool continuation is coming. A dangling tool-call
+      // message is an incomplete turn, not a reason to wait for the long progress
+      // timeout (notably when the user aborts during tool execution).
+      return !lastAssistantHasToolCall(ctx);
+    }
 
     const now = Date.now();
     if (!sawAssistant && ctx.isIdle() && now - started >= TURN_START_TIMEOUT_MS) return false;
@@ -1606,6 +1613,7 @@ export async function runPipeline(
   agentOverride?: string,
   resume?: ResumeState,
 ): Promise<void> {
+  stopIntent = null;
   const configPath = await resolveConfigPath(ctx.cwd);
   if (!configPath) {
     ctx.ui.notify("No harness configuration found (harness.config.yaml).", "error");
@@ -1712,6 +1720,7 @@ if (!steps || steps.length === 0) {
 
   try {
     for (let i = startAt; i < steps.length; i++) {
+      if (stopIntent) break;
       const agentName = steps[i];
       // Per step, never inherited: the previous step's decision and report
       // belong to it. The report is dropped again before the next step, but the
@@ -1890,6 +1899,10 @@ if (!steps || steps.length === 0) {
       }
       stepMessage.push(`Task: ${task}`);
 
+      // A stop can arrive while model setup, preflight or check verification was
+      // awaiting work; do not launch the next model turn after that request.
+      if (stopIntent) break;
+
       // REQ-016: a step whose turn ended in a model error is retried once. The
       // common cause is a transient provider failure, and one turn is cheaper
       // than stopping a run that already holds implemented work. The retry is
@@ -1903,7 +1916,9 @@ if (!steps || steps.length === 0) {
         // failed must not be read as the successful retry's own. The hook only
         // writes when the slot is empty, so without this it would survive.
         lastDecision = null;
-        if (!(await sendAndAwait(stepMessage.join("\n")))) {
+        const turnCompleted = await sendAndAwait(stepMessage.join("\n"));
+        if (stopIntent) break;
+        if (!turnCompleted) {
           if (attempt < STEP_RETRY_LIMIT && ctx.isIdle()) {
             ctx.ui.notify(
               `Step ${i + 1} (${agentName}) did not start an assistant turn. Retrying it once (attempt ${attempt + 2}/${STEP_RETRY_LIMIT + 1}).`,
@@ -1926,9 +1941,10 @@ if (!steps || steps.length === 0) {
           "warning",
         );
       }
+      if (stopIntent) break;
       if (turnWaitFailed) break;
       if (turn?.stopReason === "aborted") {
-        ctx.ui.notify(`Pipeline aborted by user at step ${i + 1} (${agentName}).`, "warning");
+        if (!stopIntent) ctx.ui.notify(`Pipeline aborted by user at step ${i + 1} (${agentName}).`, "warning");
         break;
       }
       if (turn?.stopReason === "error") {
@@ -2031,7 +2047,14 @@ if (!steps || steps.length === 0) {
       if (!shortCircuited && decision !== "answer_only" && owesReport) {
         let gaps = reportGaps(lastReport, turn?.text ?? "");
         if (gaps.length > 0) {
-          if (!(await sendAndAwait(reportRepairPrompt(agentName, gaps, stepSections)))) {
+          const repairCompleted = await sendAndAwait(reportRepairPrompt(agentName, gaps, stepSections));
+          if (stopIntent) {
+            // The original turn ran, but an interrupted report repair means this
+            // step is not complete for resume purposes.
+            if (stopIntent === "stop" && completed[completed.length - 1] === agentName) completed.pop();
+            break;
+          }
+          if (!repairCompleted) {
             reportMissing = true;
             ctx.ui.notify(
               `Pipeline stopped: the repair turn for step ${i + 1} (${agentName}) did not produce a complete assistant turn.`,
@@ -2146,7 +2169,25 @@ if (!steps || steps.length === 0) {
     await refreshModeStatus(ctx);
   }
 
-  if (completed.length === steps.length) {
+  const requestedExit = stopIntent;
+  stopIntent = null;
+  if (requestedExit === "end") {
+    writeStoppedPipeline(pi);
+    closeDesignSession(pi);
+    await refreshModeStatus(ctx);
+    ctx.ui.notify(
+      `Pipeline "${mode}" ended by the user. The stopped record was cleared; the next plain message goes to the orchestrator.`,
+      "info",
+    );
+  } else if (requestedExit === "stop" && completed.length < steps.length) {
+    const failedStep = steps[Math.min(completed.length, steps.length - 1)];
+    writeStoppedPipeline(pi, { mode, task, steps: [...steps], completed: [...completed], failedStep });
+    ctx.ui.notify(
+      `Pipeline "${mode}" stopped by the user at step ${completed.length + 1} (${failedStep}) after ${completed.length}/${steps.length} steps. ` +
+        "The tree holds partial work. Use /harness-resume to continue, /harness-delivery to deliver what is verified, or /harness-end to discard this run and return to the orchestrator.",
+      "warning",
+    );
+  } else if (completed.length === steps.length) {
     // A finished run must not leave a stop behind, or the input hook would keep
     // offering to resume a pipeline that is already over.
     writeStoppedPipeline(pi);
@@ -3125,6 +3166,18 @@ const CONFIG_MENU = [
 
 export default async function harnessExtension(pi: ExtensionAPI) {
   let pipelineRunning = false;
+  const requestPipelineExit = (intent: "stop" | "end", ctx: ExtensionCommandContext): boolean => {
+    if (!pipelineRunning) return false;
+    stopIntent = intent;
+    ctx.abort();
+    ctx.ui.notify(
+      intent === "stop"
+        ? "Stopping the current pipeline; its completed steps will remain resumable."
+        : "Ending the current pipeline and returning control to the orchestrator.",
+      "warning",
+    );
+    return true;
+  };
 
   // Show the workflow mode in the footer as soon as the session starts
   // (also runs after /reload, which rebuilds the extension runtime).
@@ -3192,10 +3245,16 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     // cannot succeed in that process.
     if (process.env.PI_HARNESS_SUBAGENT) return { action: "continue" };
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
-    if (event.streamingBehavior) return { action: "continue" };
-    if (pipelineRunning) return { action: "continue" };
     const task = event.text.trim();
     if (!task || task.startsWith("/")) return { action: "continue" };
+    if (pipelineRunning) {
+      ctx.ui.notify(
+        "A harness pipeline is running. Your message was not sent to its current step. Use /harness-stop to pause it or /harness-end to end it and return control to the orchestrator.",
+        "warning",
+      );
+      return { action: "handled" };
+    }
+    if (event.streamingBehavior) return { action: "continue" };
     // The configuration is read once here rather than only in the auto-harness
     // branch below: the stopped-pipeline guard needs `auto_harness` to know
     // whether eating a plain message is its job or the model's. `null` means the
@@ -3407,17 +3466,43 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("harness-end", {
-    description: "Close the architect's design session: the next plain message is routed by the orchestrator again",
+  pi.registerCommand("harness-stop", {
+    description: "Stop the running pipeline and keep its completed steps resumable",
     handler: async (_args, ctx) => {
       if (!requireUI(ctx)) return;
-      if (!inArchitectSession) {
+      if (requestPipelineExit("stop", ctx)) return;
+      if (currentStoppedPipeline(ctx)) {
+        ctx.ui.notify(
+          "No pipeline is running. A stopped pipeline is recorded; use /harness-resume or /harness-delivery, or /harness-end to discard it.",
+          "info",
+        );
+        return;
+      }
+      ctx.ui.notify("No pipeline is running.", "info");
+    },
+  });
+
+  pi.registerCommand("harness-end", {
+    description: "End a pipeline or design session and return control to the orchestrator",
+    handler: async (_args, ctx) => {
+      if (!requireUI(ctx)) return;
+      if (requestPipelineExit("end", ctx)) return;
+      const stopped = currentStoppedPipeline(ctx);
+      const hadDesignSession = inArchitectSession;
+      if (stopped) writeStoppedPipeline(pi);
+      if (hadDesignSession) closeDesignSession(pi);
+      if (!stopped && !hadDesignSession) {
         ctx.ui.notify("No design session is open.", "info");
         return;
       }
-      closeDesignSession(pi);
       await refreshModeStatus(ctx);
-      ctx.ui.notify("Design session closed: the next plain message is routed by the orchestrator again.", "info");
+      if (stopped && hadDesignSession) {
+        ctx.ui.notify("Stopped pipeline discarded and design session closed: the next plain message is routed by the orchestrator.", "info");
+      } else if (stopped) {
+        ctx.ui.notify("Stopped pipeline discarded: the next plain message is routed by the orchestrator.", "info");
+      } else {
+        ctx.ui.notify("Design session closed: the next plain message is routed by the orchestrator again.", "info");
+      }
     },
   });
 
