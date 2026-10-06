@@ -110,7 +110,10 @@ mechanism, and the reference section above tells them to read this file.
   that file **only when the user approves**, with `/harness-validate`: the
   command starts a turn for the architect, it writes what was agreed and says
   what it wrote. There is no path that puts something in that file the user did
-  not approve.
+  not approve. The architect owns the issues: on the same approving turn it
+  decides whether the approved scope needs one issue or several, creates them
+  with the GitHub tooling it is granted, and records the number each requirement
+  belongs to. The orchestrator owns no tool that reaches GitHub.
 - An architect step opens the multi-turn session implicitly; **only the user
   closes it**, with `/harness-end`. No model action opens or closes a session:
   if the agent that just ran is the architect, the conversation *is* a design

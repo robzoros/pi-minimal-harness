@@ -507,6 +507,32 @@ check(
   "formatBlockingPreflight is empty without git",
   mod.formatBlockingPreflight({ available: false, dirty: false, branch: null, upstream: null, ahead: 0, behind: 0, pullRequest: null }).length === 0,
 );
+// REQ-019: the requirements file the architect wrote is the harness's own
+// output, so it does not count as a dirty tree. Any other path does.
+check(
+  "preflight: pathsBeyondRequirements excuses only the configured requirements file",
+  mod.pathsBeyondRequirements(["REQUIREMENTS.md"], "REQUIREMENTS.md").length === 0 &&
+    mod.pathsBeyondRequirements(["requirements.md"], "REQUIREMENTS.md").length === 0 &&
+    mod.pathsBeyondRequirements(["./REQUIREMENTS.md"], "REQUIREMENTS.md").length === 0 &&
+    mod.pathsBeyondRequirements(["docs/REQ.md"], "REQ.md").length === 0 &&
+    mod.pathsBeyondRequirements(["pkg/REQUIREMENTS.md"], "REQUIREMENTS.md").length === 0,
+);
+check(
+  "preflight: any other changed path keeps the tree dirty",
+  mod.pathsBeyondRequirements(["REQUIREMENTS.md", "src/a.ts"], "REQUIREMENTS.md").length === 1 &&
+    mod.pathsBeyondRequirements(["README.md"], "REQUIREMENTS.md").length === 1 &&
+    mod.pathsBeyondRequirements([], "REQUIREMENTS.md").length === 0,
+);
+const requirementsCleanState = { ...repositoryState, dirty: false, pullRequest: null, ahead: 0, behind: 0 };
+check(
+  "preflight: a requirements-only tree yields no warning and no dirty blocker (REQ-019)",
+  mod.formatRepositoryPreflight(requirementsCleanState) === null &&
+    mod.formatBlockingPreflight(requirementsCleanState).length === 0,
+);
+check(
+  "preflight: an open PR still blocks when only the requirements file is dirty (REQ-019)",
+  mod.formatBlockingPreflight({ ...requirementsCleanState, pullRequest: repositoryState.pullRequest }).length === 1,
+);
 check(
   "renderPrompt placeholders",
   mod.renderPrompt("Task: {{task}} mode={{mode}} agent={{agent}} step={{step}}/{{steps}} prev={{previous}}", {
@@ -1646,6 +1672,19 @@ check(
     nonReaders.map((f) => fs.readFile(path.join(ROOT, "prompts", f), "utf8")),
   )).every((body) => !/mem_context|mem_search/.test(body)),
   nonReaders.join(", "),
+);
+// REQ-020: the architect's own prompt is the only channel it reads at step
+// time, so the issue duty has to be named there, or the grant is decorative.
+const architectPrompt = await fs.readFile(path.join(ROOT, "prompts", "architecture.md"), "utf8");
+check(
+  "prompt: the architect names the issue duty and the approving turn (REQ-020)",
+  /owns? the issues/i.test(architectPrompt) && /harness-validate/.test(architectPrompt) && /separable/i.test(architectPrompt),
+);
+check(
+  "contract and docs: the architect owns the issues (REQ-020)",
+  /owns? the issues/i.test(await fs.readFile(path.join(ROOT, "pi-minimal-harness.md"), "utf8")) &&
+    /owns? the issues/i.test(await fs.readFile(path.join(ROOT, "docs", "WORKFLOW.md"), "utf8")) &&
+    /owns? the issues/i.test(await fs.readFile(path.join(ROOT, "README.md"), "utf8")),
 );
 check(
   "contract: the memory section states the read-before-work duty, and who does not read",

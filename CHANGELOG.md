@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The architect's prompt names the issue duty it is expected to perform
+  (REQ-020).** REQ-011 granted the architect the GitHub tooling, but nothing the
+  architect reads at step time ever told it to create the issue the work closes,
+  so the grant went unused until the user asked for it. `prompts/architecture.md`
+  now names the duty on `/harness-validate`, and `pi-minimal-harness.md`, the
+  README and `docs/WORKFLOW.md` state that the architect owns the issues.
 - **The tests are a step of their own, and they gate delivery.** The `full`
   workflow is now `orchestrator -> explorer -> critic -> implementer -> tester
   -> delivery`. The implementer makes the change and runs only the cheapest
@@ -32,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The published surface matches the harness (REQ-018).** The README lists all
+  seven prompt templates, shows the `tester` step in the `full` workflow, calls
+  the contract by its own file instead of calling `AGENTS.md` the contract, and
+  documents `requirements_format`, `check_timeout_ms` and
+  `subagent_context_file`; `harness.config.example.yaml` carries a commented
+  `subagent_context_file` example; `AGENTS.md` no longer claims the repository
+  has no `package.json` and names the published `bin`.
 - `npx pi-minimal-harness update` migrates `workflows.full.steps`: a workflow
   still carrying the previously shipped list gains `tester` before `delivery`,
   and a customised list is left exactly as it is and reported instead, because
@@ -184,6 +197,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The requirements file no longer counts as a dirty tree (REQ-019).** A design
+  turn is a pipeline, and the preflight warned about the very
+  `defaults.requirements_file` the architect had just written — and, under
+  `preflight_policy: blocking`, stopped a later run on it. A tree whose only
+  changed path is that file is now read as clean for both the advisory warning
+  and the dirty blocker; every other changed path restores them, and an open
+  pull request still blocks.
 - `harness_report.notes` was documented as required but never validated, so a
   report that omitted it still counted as complete. It is now a gap like the
   other fields (`null` when omitted, `""` when the agent has nothing to say),
