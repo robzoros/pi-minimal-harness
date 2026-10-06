@@ -43,7 +43,11 @@ read it, so the memories accumulate unread. REQ-018 syncs the published surface
 with what the implementation and the installer already do, after REQ-014 added
 the tester and the package gained its `bin`. REQ-019 stops the requirements file
 the architect writes from counting as a dirty tree. REQ-020 states the
-architect's issue duty where the architect actually reads it.
+architect's issue duty where the architect actually reads it. REQ-021 and
+REQ-022 come from a run that stopped after every step and left the user unable
+to stop the pipeline or take back control: the first fixes the wait that read a
+step before its turn existed, the second adds `/harness-stop` and
+`/harness-end`.
 
 ## Additions
 
@@ -731,6 +735,101 @@ architect's issue duty where the architect actually reads it.
 - **Priority**: P2
 - **Status**: `IMPLEMENTED`
 
+### REQ-021 — The harness waits for the step's turn, not for an idle session
+
+- **Statement**: When the harness sends a step's message and waits for that step,
+  it shall wait for a new assistant turn produced by that send, and shall not
+  treat an already-idle session as the step having finished. The wait shall be
+  the same in every context that starts a pipeline, and shall end with a named
+  stop when no turn arrives.
+- **Rationale**: `/harness-run`, `/harness-validate`, `/harness-resume` and
+  `/harness-delivery` pass `() => ctx.waitForIdle()` as the turn wait, but Pi's
+  `AgentSession.waitForIdle()` returns immediately when the session is idle and
+  `pi.sendUserMessage()` is fire-and-forget: its `prompt()` reaches
+  `_runAgentPrompt()` — the only place `_isAgentRunActive` becomes true — only
+  after several awaits. Inside a command handler the session is idle, so the
+  wait returns before the step's turn exists; `lastAssistantTurn()` then returns
+  the previous assistant message, `reportGaps()` reports a missing
+  `harness_report`, the repair turn reads the same stale message, and the driver
+  breaks with `reportMissing` into the generic stop path. Because a step is
+  recorded as completed before its report is checked, each `/harness-resume`
+  advances exactly one step — the reported "stopped after every step, several
+  resumes, then stuck after the critic" loop. `pollIdle()` already implements the
+  correct wait (a new assistant message, no pending tool call, then idle, with a
+  no-output fallback) but is wired only into the `input` hook. The suite cannot
+  see the defect because the fake replaces `waitForIdle` with a real sleep
+  (`tests/harness.test.mjs:250`, `:737`); the comment at `:2174` documents the
+  hazard, which was fixed in the fake rather than in the driver.
+- **Acceptance**:
+  - [ ] A command-context run whose session is already idle when the message is
+        sent reads the new turn's report rather than the previous assistant
+        message, and the step advances without a stop record.
+  - [ ] The repair turn waits the same way.
+  - [ ] The assistant-message baseline is captured before the send, so a fast
+        turn is not missed, and a turn that never starts ends the step with a
+        stop rather than a hang.
+  - [ ] `ctx.waitForIdle()` no longer decides a step's completion anywhere in
+        `runPipeline`.
+  - [ ] `tests/harness.test.mjs` covers the case its own comment at `:2174`
+        documents: a command context whose `isIdle()` is immediately true and
+        delivers the turn later, asserting the pipeline reaches the next step.
+- **Traces**: `.pi/extensions/harness.ts` (`runPipeline`, `pollIdle`, the four
+  `waitForTurn` call sites), `tests/harness.test.mjs`
+- **Issue**: #38
+- **Priority**: P1
+- **Status**: `DRAFT`
+
+### REQ-022 — The user can stop a running pipeline and take back control
+
+- **Statement**: While a pipeline is running, the harness shall let the user
+  stop it explicitly and shall let the user end it and take back control.
+  `/harness-stop` shall abort the turn in flight, end the run and keep the
+  stopped-pipeline record, so the run stays resumable. `/harness-end` shall abort
+  the turn in flight when there is one, end the run, clear the record and close
+  an open design session, so the next plain message is routed by the
+  orchestrator. A plain message while a pipeline is streaming shall not be
+  passed to a step's model unnoticed.
+- **Rationale**: there is no way to stop a running pipeline or to intervene in
+  one. The registered commands are `config`, `mode`, `model`, `run`, `validate`,
+  `end`, `resume`, `delivery` and `auto`; the only mid-run exit is Ctrl+C,
+  which reaches the driver as `stopReason: "aborted"` and aborts the model
+  without being a harness decision. A plain message while a pipeline streams
+  hits the `input` hook and returns `{action: "continue"}`, so it lands in the
+  current step's model as steering the driver never sees — and the driver may
+  read that steered turn as the step's own output. `/harness-delivery` refuses
+  while a run is streaming, so "finish with what is verified" is unavailable
+  mid-run. The two commands differ only in the record, which is what makes both
+  worth having: `/harness-stop` is a recoverable pause, `/harness-end` is the
+  pipeline equivalent of the architect's `/harness-end` — close what the harness
+  has open and hand the conversation back. `ctx.abort()` is bound on the command
+  context to the same path as Escape, so a stop can cut the turn in flight
+  rather than waiting for it.
+- **Acceptance**:
+  - [ ] `/harness-stop` mid-run aborts the turn in flight, ends the run, keeps
+        the record (`mode`, `task`, the completed steps, the failed step) and
+        announces a user stop at that step, distinguishable from a model error.
+  - [ ] After it, `/harness-resume` starts at the step after the last completed
+        one and `/harness-delivery` delivers what is verified.
+  - [ ] `/harness-end` mid-run aborts the turn in flight, clears the record,
+        closes an open design session, and the next plain message is routed by
+        the orchestrator rather than refused.
+  - [ ] `/harness-end` with only a stop record clears it and returns control;
+        with neither a run nor a record nor a session it says there is nothing to
+        end.
+  - [ ] A plain message while a pipeline is streaming is refused and names
+        `/harness-stop` and `/harness-end`, rather than reaching the step's
+        model.
+  - [ ] `tests/harness.test.mjs` covers: a mid-run stop (record plus resume
+        point), a mid-run end (no record, next plain message routed by the
+        orchestrator), an end that clears a previous record, and the refusal of
+        a plain message during a run.
+- **Traces**: `.pi/extensions/harness.ts` (`runPipeline`, the `input` hook, the
+  two commands), `tests/harness.test.mjs`, `README.md`, `pi-minimal-harness.md`,
+  `AGENTS.md`, `docs/WORKFLOW.md`, `CHANGELOG.md`
+- **Issue**: #39
+- **Priority**: P1
+- **Status**: `DRAFT`
+
 ## Modifications
 
 - `prompts/orchestrator.md` — REQ-008 and REQ-011: route and hand over, without
@@ -793,6 +892,15 @@ architect's issue duty where the architect actually reads it.
   `docs/WORKFLOW.md`, `tests/harness.test.mjs` — REQ-020: the architect's
   prompt names the issue duty it is expected to perform, and the contract and
   the docs state that the architect owns the issues.
+- `.pi/extensions/harness.ts` (`runPipeline`, `pollIdle`, the four `waitForTurn`
+  call sites) and `tests/harness.test.mjs` — REQ-021: the wait is the step's new
+  assistant turn, captured from a baseline taken before the send, in every
+  context that starts a pipeline.
+- `.pi/extensions/harness.ts` (`runPipeline`, the `input` hook, `/harness-stop`,
+  `/harness-end`), `tests/harness.test.mjs`, `README.md`,
+  `pi-minimal-harness.md`, `AGENTS.md`, `docs/WORKFLOW.md`, `CHANGELOG.md` —
+  REQ-022: the user can stop a running pipeline and take back control, with the
+  record kept or cleared.
 
 ## Out of scope
 
