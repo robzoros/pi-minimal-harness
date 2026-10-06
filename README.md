@@ -43,7 +43,7 @@ workflow you can actually audit.
 | Background dispatch | `harness-dispatch` tool: independent tasks in isolated `pi` subprocesses with curated briefs; each subagent's system prompt is its own prompt template, its declared project skills, the harness contract and the project's `AGENTS.md` (when present, read last so project rules win) |
 | Installer | `npx pi-minimal-harness init` installs the extension, prompts, delivery skill, local config, and the `pi-minimal-harness.md` contract; `AGENTS.md` gets a reference to it |
 | Upgrade | `npx pi-minimal-harness update` refreshes upstream files and **only adds** missing keys to your config |
-| Tests | `node tests/harness.test.mjs` (306 checks) and `node tests/install.test.mjs` (23 installer tests) |
+| Tests | `node tests/harness.test.mjs` (308 checks) and `node tests/install.test.mjs` (23 installer tests) |
 
 ## Install in your Pi project
 

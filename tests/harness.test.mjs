@@ -1375,6 +1375,57 @@ if (gateReady) {
   console.log("SKIP preflight gate tests: git is unavailable in this environment");
 }
 
+// REQ-019 wiring, not only the pieces: the helper and the formatters are tested
+// above in isolation, this drives `runPipeline` against a real repository to
+// prove the driver recomputes `dirty` from them. A tree whose only changed path
+// is the configured requirements file must raise no preflight at all.
+const reqRepo = path.join(tmp, "req-repo");
+let reqReady = false;
+try {
+  execFileSync("git", ["init", "-q", reqRepo], { stdio: "ignore" });
+  await fs.writeFile(path.join(reqRepo, "harness.config.yaml"), forceFlags(baseCfg, { preflight_policy: "advisory", workflow_mode: "full-dry-run" }));
+  await fs.cp(path.join(ROOT, "prompts"), path.join(reqRepo, "prompts"), { recursive: true });
+  await fs.writeFile(path.join(reqRepo, "REQUIREMENTS.md"), "# Requirements\n\ncommitted\n");
+  // Commit the config and prompts too: an untracked one would itself be a
+  // changed path and the test would not be about the requirements file alone.
+  execFileSync("git", ["-C", reqRepo, "add", "-A"], { stdio: "ignore" });
+  execFileSync("git", ["-C", reqRepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"], { stdio: "ignore" });
+  // Dirty the tree with that file alone.
+  await fs.writeFile(path.join(reqRepo, "REQUIREMENTS.md"), "# Requirements\n\napproved\n");
+  reqReady = true;
+} catch {
+  reqReady = false;
+}
+
+if (reqReady) {
+  const scriptDryRun = () => {
+    assistantScript.push("Plan.\n\nHARNESS-DONE\n\nHARNESS-DECISION: PIPELINE", "Explored.\n\nHARNESS-DONE", "Reviewed.\n\nHARNESS-DONE");
+  };
+  reset();
+  scriptDryRun();
+  await mod.runPipeline(fakePi, makeCtx(reqRepo, true), "tarea", waitTurn);
+  check(
+    "preflight integration: a tree dirty only by REQUIREMENTS.md raises no warning (REQ-019)",
+    !notifies.some((n) => n.includes("Repository preflight")) && !sent.some((s) => s.includes("Repository preflight")),
+    notifies.join(" | "),
+  );
+
+  // Positive control: the same repository with one more changed path must warn,
+  // or the check above would pass merely because git never ran.
+  await fs.mkdir(path.join(reqRepo, "src"), { recursive: true });
+  await fs.writeFile(path.join(reqRepo, "src", "a.ts"), "export {};\n");
+  reset();
+  scriptDryRun();
+  await mod.runPipeline(fakePi, makeCtx(reqRepo, true), "tarea", waitTurn);
+  check(
+    "preflight integration: one more changed path restores the warning (REQ-019)",
+    notifies.some((n) => n.includes("Repository preflight") && n.includes("uncommitted changes")),
+    notifies.join(" | "),
+  );
+} else {
+  console.log("SKIP preflight integration tests: git is unavailable in this environment");
+}
+
 // --- P1-5: structured control tools -------------------------------------------
 check("control tools are registered", !!tools["harness_decision"] && !!tools["harness_report"]);
 check(
