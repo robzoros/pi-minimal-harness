@@ -73,6 +73,12 @@ const MAX_REPAIR_ROUNDS = 3;
  * number.
  */
 const STEP_RETRY_LIMIT = 1;
+/** No assistant output after this long while idle means the sent turn never started. */
+const TURN_START_TIMEOUT_MS = 8000;
+/** Maximum silence between assistant messages while waiting for a complete turn. */
+const TURN_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000;
+/** Give Pi time to settle after aborting a stalled turn before releasing the driver. */
+const TURN_ABORT_SETTLE_TIMEOUT_MS = 10 * 1000;
 const STATUS_KEY = "corpustory-harness-mode";
 const DISPATCH_WIDGET_KEY = "corpustory-harness-dispatch";
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -1166,29 +1172,51 @@ async function confirmPreflightBlock(
   );
 }
 
+/** Count assistant messages in the active branch, including tool-call messages. */
+export function countAssistantMessages(ctx: ExtensionContext): number {
+  return ctx.sessionManager
+    .getBranch()
+    .filter((entry) => (entry as { type?: string; message?: { role?: string } }).type === "message" && (entry as { message?: { role?: string } }).message?.role === "assistant").length;
+}
+
 /**
- * Turn wait for the auto-harness `input` hook, where ctx.waitForIdle() is not
- * available: wait for a new assistant message to appear and the session to go
- * idle. Falls back after 8 s of idleness with no output (turn never started).
+ * Wait for a complete assistant turn newer than `baseline`. A turn is complete
+ * only when the branch has a new assistant message, the latest assistant
+ * message is not a tool call, and the session is idle. The baseline is captured
+ * before sending so even a fast turn cannot be missed.
  *
- * A turn that calls a tool produces several assistant messages (the tool call,
- * then the text), and the session is briefly idle between them. Waiting on
- * "some output + idle" would return on the tool-call message and read the step
- * as finished, so a message that still carries a pending tool call never
- * satisfies the wait.
+ * Return false when no turn starts while the session stays idle, or when the
+ * assistant stops making progress. Abort a still-running turn on the latter so
+ * the driver never mistakes a partial tool-call message for a completed step.
  */
-async function pollIdle(ctx: ExtensionContext): Promise<void> {
-  const countAssistants = () =>
-    ctx.sessionManager
-      .getBranch()
-      .filter((e) => (e as { type?: string; message?: { role?: string } }).type === "message" && (e as { message?: { role?: string } }).message?.role === "assistant").length;
-  const base = countAssistants();
+export async function awaitStepTurn(
+  ctx: ExtensionContext,
+  baseline: number,
+  progressTimeoutMs = TURN_PROGRESS_TIMEOUT_MS,
+): Promise<boolean> {
   const started = Date.now();
-  let sawOutput = false;
+  let lastProgress = started;
+  let observed = baseline;
+  let sawAssistant = false;
   for (;;) {
-    if (countAssistants() > base) sawOutput = true;
-    if (sawOutput && !lastAssistantHasToolCall(ctx) && ctx.isIdle()) return;
-    if (!sawOutput && ctx.isIdle() && Date.now() - started > 8000) return;
+    const count = countAssistantMessages(ctx);
+    if (count > observed) {
+      observed = count;
+      lastProgress = Date.now();
+      sawAssistant = true;
+    }
+    if (sawAssistant && !lastAssistantHasToolCall(ctx) && ctx.isIdle()) return true;
+
+    const now = Date.now();
+    if (!sawAssistant && ctx.isIdle() && now - started >= TURN_START_TIMEOUT_MS) return false;
+    if (now - lastProgress >= progressTimeoutMs) {
+      if (!ctx.isIdle()) {
+        ctx.abort();
+        const abortDeadline = Date.now() + TURN_ABORT_SETTLE_TIMEOUT_MS;
+        while (!ctx.isIdle() && Date.now() < abortDeadline) await sleep(50);
+      }
+      return false;
+    }
     await sleep(150);
   }
 }
@@ -1573,7 +1601,7 @@ export async function runPipeline(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   task: string,
-  waitForTurn: () => Promise<void>,
+  waitForTurn: (baseline: number) => Promise<boolean>,
   modeOverride?: string,
   agentOverride?: string,
   resume?: ResumeState,
@@ -1655,6 +1683,16 @@ if (!steps || steps.length === 0) {
   // handoff a step is told to expect has to be reachable from its own prompt,
   // not only from the transcript the agent happens to see.
   let previousStepOutput: string | null = null;
+  // Capture the assistant-message baseline before every send. `sendUserMessage`
+  // is fire-and-forget, so waiting on an already-idle command context can return
+  // before Pi has started the new turn.
+  const sendAndAwait = async (message: string): Promise<boolean> => {
+    const baseline = countAssistantMessages(ctx);
+    pi.sendUserMessage(message);
+    // Existing test seams return void; only an explicit false means the wait
+    // did not observe a complete turn.
+    return (await waitForTurn(baseline)) !== false;
+  };
   // The report of the step that mutated the tree outlives that step, because
   // `lastReport` is cleared before every step and REQ-002 needs the checks the
   // implementer declared once delivery is about to run. The critic's expected
@@ -1859,13 +1897,27 @@ if (!steps || steps.length === 0) {
       // re-sends the same step message: the step is unchanged, only its turn is.
       // An abort is not retried — the user asked for it to stop.
       let turn: LastTurn | null = null;
+      let turnWaitFailed = false;
       for (let attempt = 0; ; attempt++) {
         // Per attempt, not per step: a decision recorded by an attempt that then
         // failed must not be read as the successful retry's own. The hook only
         // writes when the slot is empty, so without this it would survive.
         lastDecision = null;
-        pi.sendUserMessage(stepMessage.join("\n"));
-        await waitForTurn();
+        if (!(await sendAndAwait(stepMessage.join("\n")))) {
+          if (attempt < STEP_RETRY_LIMIT && ctx.isIdle()) {
+            ctx.ui.notify(
+              `Step ${i + 1} (${agentName}) did not start an assistant turn. Retrying it once (attempt ${attempt + 2}/${STEP_RETRY_LIMIT + 1}).`,
+              "warning",
+            );
+            continue;
+          }
+          turnWaitFailed = true;
+          ctx.ui.notify(
+            `Pipeline stopped: step ${i + 1} (${agentName}) did not produce a complete assistant turn; no stale or partial reply was read.`,
+            "error",
+          );
+          break;
+        }
         turn = lastAssistantTurn(ctx);
         if (turn?.stopReason !== "error" || attempt >= STEP_RETRY_LIMIT) break;
         ctx.ui.notify(
@@ -1874,6 +1926,7 @@ if (!steps || steps.length === 0) {
           "warning",
         );
       }
+      if (turnWaitFailed) break;
       if (turn?.stopReason === "aborted") {
         ctx.ui.notify(`Pipeline aborted by user at step ${i + 1} (${agentName}).`, "warning");
         break;
@@ -1978,8 +2031,14 @@ if (!steps || steps.length === 0) {
       if (!shortCircuited && decision !== "answer_only" && owesReport) {
         let gaps = reportGaps(lastReport, turn?.text ?? "");
         if (gaps.length > 0) {
-          pi.sendUserMessage(reportRepairPrompt(agentName, gaps, stepSections));
-          await waitForTurn();
+          if (!(await sendAndAwait(reportRepairPrompt(agentName, gaps, stepSections)))) {
+            reportMissing = true;
+            ctx.ui.notify(
+              `Pipeline stopped: the repair turn for step ${i + 1} (${agentName}) did not produce a complete assistant turn.`,
+              "error",
+            );
+            break;
+          }
           const repaired = lastAssistantTurn(ctx);
           gaps = reportGaps(lastReport, repaired?.text ?? "");
           if (gaps.length > 0) {
@@ -3181,7 +3240,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     // pipelineRunning so a turn already in flight is never overlapped.
     if (inArchitectSession) {
       pipelineRunning = true;
-      void runPipeline(pi, ctx, task, () => pollIdle(ctx), ANALYSIS_MODE, ARCHITECT_AGENT)
+      void runPipeline(pi, ctx, task, (baseline) => awaitStepTurn(ctx, baseline), ANALYSIS_MODE, ARCHITECT_AGENT)
         .catch((error) => ctx.ui.notify(`harness pipeline failed: ${String(error)}`, "error"))
         .finally(() => {
           pipelineRunning = false;
@@ -3191,7 +3250,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
     try {
       if (autoHarness !== true) return { action: "continue" };
       pipelineRunning = true;
-      void runPipeline(pi, ctx, task, () => pollIdle(ctx))
+      void runPipeline(pi, ctx, task, (baseline) => awaitStepTurn(ctx, baseline))
         .catch((error) => ctx.ui.notify(`harness pipeline failed: ${String(error)}`, "error"))
         .finally(() => {
           pipelineRunning = false;
@@ -3305,7 +3364,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       }
       pipelineRunning = true;
       try {
-        await runPipeline(pi, ctx, task, () => ctx.waitForIdle());
+        await runPipeline(pi, ctx, task, (baseline) => awaitStepTurn(ctx, baseline));
       } catch (error) {
         ctx.ui.notify(`Pipeline failed: ${String(error)}`, "error");
       } finally {
@@ -3339,7 +3398,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
         "ask whether to continue with another requirement or finish. Keep the session open: only /harness-end closes it.";
       pipelineRunning = true;
       try {
-        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), ANALYSIS_MODE, ARCHITECT_AGENT);
+        await runPipeline(pi, ctx, task, (baseline) => awaitStepTurn(ctx, baseline), ANALYSIS_MODE, ARCHITECT_AGENT);
       } catch (error) {
         ctx.ui.notify(`Approval failed: ${String(error)}`, "error");
       } finally {
@@ -3388,7 +3447,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       const note = args.trim();
       pipelineRunning = true;
       try {
-        await runPipeline(pi, ctx, note ? `${stopped.task}\n\nNote for the remaining steps: ${note}` : stopped.task, () => ctx.waitForIdle(), stopped.mode, undefined, {
+        await runPipeline(pi, ctx, note ? `${stopped.task}\n\nNote for the remaining steps: ${note}` : stopped.task, (baseline) => awaitStepTurn(ctx, baseline), stopped.mode, undefined, {
           startAt: stopped.completed.length,
           completed: stopped.completed,
           steps: stopped.steps,
@@ -3417,7 +3476,7 @@ export default async function harnessExtension(pi: ExtensionAPI) {
       const task = args.trim() || "Deliver the current verified changes.";
       pipelineRunning = true;
       try {
-        await runPipeline(pi, ctx, task, () => ctx.waitForIdle(), "full", "delivery");
+        await runPipeline(pi, ctx, task, (baseline) => awaitStepTurn(ctx, baseline), "full", "delivery");
       } catch (error) {
         ctx.ui.notify(`Delivery failed: ${String(error)}`, "error");
       } finally {

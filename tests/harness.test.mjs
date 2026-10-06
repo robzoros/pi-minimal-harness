@@ -257,6 +257,7 @@ await mod.default(fakePi);
 
 const waitTurn = async () => {
   await new Promise((r) => setTimeout(r, 140));
+  return true;
 };
 const reset = () => {
   sent.length = 0;
@@ -270,6 +271,9 @@ const reset = () => {
   assistantTurns = 0;
   pendingToolCall = null;
   toolErrors.length = 0;
+  // The wait now reads idleness from the session: a leftover `false` would
+  // send the next test into the wait's bound, so the flag is restored here.
+  idle = true;
   // The design session is persisted by writing an entry to the branch, and
   // `session_start` reads it back from there. Without clearing it, a session
   // opened by one test would be restored into the next — so the test that exists
@@ -1813,6 +1817,7 @@ const waitTurnInjecting = (injections) => async () => {
     if (next.call) pendingToolCall = next.call;
   }
   await new Promise((r) => setTimeout(r, 140));
+  return true;
 };
 
 // A report that forgets `lessons` is incomplete: one repair turn, named field.
@@ -2604,6 +2609,73 @@ check(
   sent.length === 6 && sent[5].includes("prompts/delivery.md"),
   `sent=${sent.length}`,
 );
+
+// --- REQ-021: the step's own turn, not an idle session -------------------------
+//
+// The four command paths used to wait on `ctx.waitForIdle()`, which Pi answers
+// immediately when the session is idle — before the sent turn exists — so every
+// step read the previous assistant message and stopped. The driver now waits
+// for a complete new assistant turn from a baseline taken before the send.
+// These tests drive that wiring: a command context whose `waitForIdle` is a
+// real no-op (exactly Pi's behaviour when idle) must still advance, and a wait
+// that never sees a turn must stop with a name instead of reading a stale reply.
+reset();
+{
+  const immediateCtx = makeCtx(tmp, true);
+  immediateCtx.waitForIdle = async () => {};
+  const immediateWait = (baseline) => mod.awaitStepTurn(immediateCtx, baseline);
+  await mod.runPipeline(fakePi, immediateCtx, "req-021 idle command context", immediateWait);
+  check(
+    "wait: an immediately-idle command context still advances past the first step",
+    sent.length === 6 && sent[1]?.includes("prompts/explorer.md") && sent[5]?.includes("prompts/delivery.md"),
+    `sent=${sent.length}`,
+  );
+  check(
+    "wait: advancing leaves no stop record",
+    mod.readStoppedPipelineFromBranch(branchArr) === null,
+    JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+  );
+}
+
+// A wait that never observes a turn ends the step with a named stop: the
+// unstarted step is not recorded as completed, and the generic stop path keeps
+// the run resumable instead of hanging.
+reset();
+await mod.runPipeline(fakePi, makeCtx(tmp, true), "req-021 no turn", async () => false);
+check(
+  "wait: a step that never produces a turn stops with a named message",
+  notifies.some((n) => n.includes("did not produce a complete assistant turn")),
+  notifies.join(" | ").slice(0, 200),
+);
+check(
+  "wait: the unstarted step is not recorded as completed",
+  (mod.readStoppedPipelineFromBranch(branchArr)?.completed.length ?? -1) === 0,
+  JSON.stringify(mod.readStoppedPipelineFromBranch(branchArr)),
+);
+
+// The baseline is captured before the send: a turn delivered after the wait
+// starts is still seen, and silence returns false on the bound instead of
+// hanging. The small bound keeps this unit fast; production uses the default.
+reset();
+{
+  const unitCtx = makeCtx(tmp, true);
+  const base = mod.countAssistantMessages(unitCtx);
+  fakePi.sendUserMessage("unit probe");
+  const saw = await mod.awaitStepTurn(unitCtx, base);
+  check("wait: a turn delivered after the call is still seen", saw === true, `saw=${saw}`);
+}
+reset();
+{
+  const boundCtx = makeCtx(tmp, true);
+  const base = mod.countAssistantMessages(boundCtx);
+  const started = Date.now();
+  const saw = await mod.awaitStepTurn(boundCtx, base, 200);
+  check(
+    "wait: silence returns false on the bound instead of hanging",
+    saw === false && Date.now() - started < 8000,
+    `saw=${saw} elapsed=${Date.now() - started}`,
+  );
+}
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

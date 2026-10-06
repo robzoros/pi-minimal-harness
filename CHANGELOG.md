@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pipeline steps wait for their own assistant turn (REQ-021).** Command-driven
+  runs no longer treat an already-idle session as a completed step; the driver
+  waits for a new complete turn from a baseline captured before sending and
+  stops explicitly if that turn never completes.
+
 ### Added
 
 - **The architect's prompt names the issue duty it is expected to perform
